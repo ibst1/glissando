@@ -38,6 +38,17 @@ public sealed class Session : IDisposable
     /// <summary>Latest measured round trip to the peer in milliseconds, 0 until a pong has arrived.</summary>
     public double RttMs { get; private set; }
 
+    /// <summary>This PC's Windows session is locked (lock screen). Nothing is captured or injected meanwhile.</summary>
+    public bool LocalLocked { get; private set; }
+
+    /// <summary>The other PC reported its session locked; crossing over is pointless until it is unlocked.</summary>
+    public bool PeerLocked { get; private set; }
+
+    /// <summary>The other PC pings slowly because it is idle; allow it more silence before declaring it lost.</summary>
+    public bool PeerPowerSaving { get; private set; }
+
+    private bool _powerSaving;
+
     private readonly Settings _s;
     private readonly IChannel _channel;
     private readonly InputCapture _capture;
@@ -59,7 +70,61 @@ public sealed class Session : IDisposable
         _capture = capture;
         _injector = injector;
         _clipboard = clipboard;
-        _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !_injector.Active;
+        _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !LocalLocked && !PeerLocked && !_injector.Active;
+    }
+
+    /// <summary>Windows locked or unlocked this session.</summary>
+    public void SetLocalLocked(bool locked)
+    {
+        if (LocalLocked == locked) return;
+        LocalLocked = locked;
+        Log.Info(locked ? "session locked" : "session unlocked");
+        if (locked)
+        {
+            _capture.Release();
+            _injector.Deactivate();
+        }
+        if (Authenticated) SendStatus();
+        StateChanged?.Invoke();
+    }
+
+    private void SendStatus()
+    {
+        byte flags = (byte)((LocalLocked ? 1 : 0) | (_powerSaving ? 2 : 0));
+        Enqueue(new Frame(FrameType.Status, [flags]));
+    }
+
+    /// <summary>Ctrl+Alt+J: jump to the middle of the other PC's first screen without touching an edge.</summary>
+    private void Jump()
+    {
+        var layout = _capture.Layout;
+        if (layout.Peer.Length == 0) return;
+        var m = layout.Peer.MinBy(p => p.Number == 0 ? int.MaxValue : p.Number).Bounds;
+        var center = new Point(m.X + m.Width / 2, m.Y + m.Height / 2);
+        _capture.EnterAt(new Crossing(Dir.Right, center));
+    }
+
+    /// <summary>Everything worth pasting into a bug report; the passphrase is masked.</summary>
+    public string Diagnostics(string adapterInfo)
+    {
+        var layout = _capture.Layout;
+        var sb = new StringBuilder();
+        sb.AppendLine($"Glissando {Program.Version} on {Environment.MachineName}, {Environment.OSVersion}, {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.AppendLine($"Bluetooth: {adapterInfo}");
+        sb.AppendLine($"Transport: {TransportStatus}; linked={Linked} role={(Linked ? (_channel.IsCentral ? "central" : "peripheral") : "-")} authenticated={Authenticated} peer='{PeerName}' rtt={RttMs:F0} ms");
+        sb.AppendLine($"State: controlling={Controlling} controlled={Controlled} locked={Locked} sessionLocked={LocalLocked} peerLocked={PeerLocked} powerSaving={_powerSaving} peerPowerSaving={PeerPowerSaving} idle={Native.IdleMs() / 1000} s");
+        sb.AppendLine($"Settings: ble={_s.Ble} capture={_s.CaptureEnabled} clipboard={_s.SyncClipboard} hideCursor={_s.HideCursorWhileControlling} powerSave={_s.PowerSaveWhenIdle} keepalive={_s.KeepaliveMs} timeout={_s.PeerTimeoutMs} passphrase={(string.IsNullOrEmpty(_s.Passphrase) ? "(empty)" : $"set, {_s.Passphrase.Length} chars")} placementUpdated={_s.PlacementUpdated}");
+        sb.AppendLine($"Layout: peerOrigin={layout.PeerOrigin} virtualScreen={Layout.MyVirtualScreen()}");
+        foreach (var m in layout.Mine) sb.AppendLine($"  mine #{m.Number}: {m.Bounds}");
+        foreach (var m in layout.Peer) sb.AppendLine($"  peer #{m.Number}: {m.Bounds}");
+        foreach (var s in layout.CrossingSegments()) sb.AppendLine($"  crossing: {s.Side}@{s.Fixed} {s.From}-{s.To}");
+        sb.AppendLine("Log tail:");
+        try
+        {
+            foreach (var line in File.ReadLines(Log.FilePath).TakeLast(60)) sb.AppendLine("  " + line);
+        }
+        catch (Exception ex) { sb.AppendLine("  (log unreadable: " + ex.Message + ")"); }
+        return sb.ToString();
     }
 
     public void SetLocked(bool locked)
@@ -96,6 +161,7 @@ public sealed class Session : IDisposable
         };
         _capture.LeftRemote += () => { CursorHider.Restore(); StateChanged?.Invoke(); };
         _capture.LockToggleRequested += () => SetLocked(!Locked);
+        _capture.JumpRequested += Jump;
 
         _injector.StateChanged += () => StateChanged?.Invoke();
         _injector.ReturnEdgeHit += back =>
@@ -174,6 +240,8 @@ public sealed class Session : IDisposable
         if (Authenticated == v) return;
         Authenticated = v;
         Log.Info(v ? $"peer authenticated: {PeerName}" : "peer lost");
+        if (v) SendStatus();
+        else { PeerLocked = false; PeerPowerSaving = false; }
         StateChanged?.Invoke();
     }
 
@@ -235,6 +303,22 @@ public sealed class Session : IDisposable
 
             case FrameType.Clipboard:
                 if (Authenticated) ReceiveClipboard(f);
+                break;
+
+            case FrameType.Status:
+                if (f.Payload.Length >= 1)
+                {
+                    bool wasLocked = PeerLocked;
+                    PeerLocked = (f.Payload[0] & 1) != 0;
+                    PeerPowerSaving = (f.Payload[0] & 2) != 0;
+                    if (PeerLocked && !wasLocked)
+                    {
+                        Log.Info($"{PeerName} locked its session");
+                        _capture.Release();
+                    }
+                    else if (!PeerLocked && wasLocked) Log.Info($"{PeerName} unlocked its session");
+                    StateChanged?.Invoke();
+                }
                 break;
 
             case FrameType.Enter:
@@ -335,13 +419,25 @@ public sealed class Session : IDisposable
                 double sincePeer = (now - _lastPeer) * 1000.0 / Stopwatch.Frequency;
                 double sinceHello = (now - _lastHello) * 1000.0 / Stopwatch.Frequency;
 
-                if (Authenticated && sincePeer > _s.PeerTimeoutMs)
+                // Power saving: after a long idle stretch, ping rarely so the BLE link can lengthen its
+                // connection interval. Tell the peer, so it tolerates the longer silence.
+                bool saving = _s.PowerSaveWhenIdle && !Controlling && !Controlled && Native.IdleMs() > (uint)_s.PowerSaveAfterMs;
+                if (saving != _powerSaving)
+                {
+                    _powerSaving = saving;
+                    Log.Info(saving ? "idle: slowing keepalive" : "active again: normal keepalive");
+                    if (Authenticated) SendStatus();
+                }
+                int keepalive = saving ? _s.IdleKeepaliveMs : _s.KeepaliveMs;
+                int timeout = PeerPowerSaving ? Math.Max(_s.PeerTimeoutMs, _s.IdleKeepaliveMs * 2 + 2000) : _s.PeerTimeoutMs;
+
+                if (Authenticated && sincePeer > timeout)
                 {
                     Log.Warn($"no frames from peer for {sincePeer:F0} ms");
                     SetAuthenticated(false);
                 }
                 if (!Authenticated && sinceHello > 2000) SendHello();
-                else if (sinceSend > _s.KeepaliveMs) Enqueue(Frame.Ping(now));
+                else if (sinceSend > keepalive) Enqueue(Frame.Ping(now));
             }
         }
         catch (OperationCanceledException) { }
@@ -397,6 +493,8 @@ public sealed class Session : IDisposable
             string rtt = RttMs > 0 ? $", {RttMs:F0} ms" : "";
             if (Controlling) return $"Controlling {PeerName}{rtt}";
             if (Controlled) return $"{PeerName} is controlling this PC{rtt}";
+            if (LocalLocked) return $"This session is locked{rtt}";
+            if (PeerLocked) return $"{PeerName} is locked; unlock it with its own keyboard{rtt}";
             if (Locked) return $"Cursor locked to this PC (Ctrl+Alt+L unlocks){rtt}";
             return _s.CaptureEnabled
                 ? $"Ready, linked to {PeerName}{rtt}"

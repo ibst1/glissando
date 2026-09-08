@@ -37,6 +37,15 @@ public sealed class Settings
     /// <summary>Swap the system cursors for blank ones while this PC controls the other; restored on return.</summary>
     public bool HideCursorWhileControlling { get; set; }
 
+    /// <summary>After a few minutes without input, ping only every 10 s so the BLE link can idle (first move after that is slower).</summary>
+    public bool PowerSaveWhenIdle { get; set; }
+
+    /// <summary>Idle time before power saving kicks in.</summary>
+    public int PowerSaveAfterMs { get; set; } = 5 * 60_000;
+
+    /// <summary>Ping interval while power saving.</summary>
+    public int IdleKeepaliveMs { get; set; } = 10_000;
+
     /// <summary>Ping interval while linked. Keeps the BLE connection interval short.</summary>
     public int KeepaliveMs { get; set; } = 1000;
 

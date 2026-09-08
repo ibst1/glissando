@@ -23,6 +23,22 @@ internal static class Native
     [DllImport("user32.dll")]
     public static extern short GetAsyncKeyState(int vKey);
 
+    public const int VK_J = 0x4A;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+    /// <summary>Milliseconds since the user last touched keyboard or mouse on this PC (injected input counts too).</summary>
+    public static uint IdleMs()
+    {
+        var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
+        return GetLastInputInfo(ref info) ? unchecked((uint)Environment.TickCount - info.dwTime) : 0;
+    }
+
     public static bool IsDown(int vKey) => (GetAsyncKeyState(vKey) & 0x8000) != 0;
 
     public const int SM_XVIRTUALSCREEN = 76, SM_YVIRTUALSCREEN = 77, SM_CXVIRTUALSCREEN = 78, SM_CYVIRTUALSCREEN = 79;

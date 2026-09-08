@@ -18,8 +18,10 @@ $localDotnet = Join-Path $env:LOCALAPPDATA "dotnet\dotnet.exe"
 $dotnet = if (Test-Path $localDotnet) { $localDotnet } else { "dotnet" }
 
 $selfContained = if ($FrameworkDependent) { "false" } else { "true" }
+# No IncludeNativeLibrariesForSelfExtract: we ship no native libraries of our own, and with it the
+# first start of every new build spent ~30 s extracting the runtime to a cache.
 & $dotnet publish $proj -c $Configuration -r $Runtime --self-contained $selfContained `
-    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $target
+    -p:PublishSingleFile=true -o $target
 if ($LASTEXITCODE -ne 0) { throw "publish failed" }
 
 New-Item -ItemType Directory -Force $dist | Out-Null

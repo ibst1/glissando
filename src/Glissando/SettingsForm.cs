@@ -201,6 +201,7 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _clip = new() { Text = "Copy clipboard text across when the cursor crosses", AutoSize = true };
     private readonly CheckBox _autostart = new() { Text = "Start Glissando with Windows", AutoSize = true };
     private readonly CheckBox _hideCursor = new() { Text = "Hide this PC's cursor while controlling the other PC (swaps the system cursors; restored on return)", AutoSize = true, MaximumSize = new Size(480, 0) };
+    private readonly CheckBox _powerSave = new() { Text = "Save power after 5 minutes without input (the first move after a pause is then slower)", AutoSize = true, MaximumSize = new Size(480, 0) };
     private readonly ComboBox _ble = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
     private readonly Label _btInfo = new() { AutoSize = true, MaximumSize = new Size(470, 0) };
     private readonly Point _originalOrigin;
@@ -218,7 +219,7 @@ internal sealed class SettingsForm : Form
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(524, 760);
+        ClientSize = new Size(524, 800);
         MinimumSize = new Size(420, 420);
         Font = new Font("Segoe UI", 9f);
         Log.Info($"settings form opening: firstRun={firstRun} peerOrigin={initial.PeerOrigin} mine={initial.Mine.Length} peer={initial.Peer.Length}");
@@ -284,9 +285,11 @@ internal sealed class SettingsForm : Form
         _clip.Checked = working.SyncClipboard;
         _autostart.Checked = Settings.StartWithWindows;
         _hideCursor.Checked = working.HideCursorWhileControlling;
+        _powerSave.Checked = working.PowerSaveWhenIdle;
         layout.Controls.Add(_capture);
         layout.Controls.Add(_clip);
         layout.Controls.Add(_hideCursor);
+        layout.Controls.Add(_powerSave);
         layout.Controls.Add(_autostart);
 
         var bleRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 6, 0, 8) };
@@ -369,6 +372,7 @@ internal sealed class SettingsForm : Form
         _s.CaptureEnabled = _capture.Checked;
         _s.SyncClipboard = _clip.Checked;
         _s.HideCursorWhileControlling = _hideCursor.Checked;
+        _s.PowerSaveWhenIdle = _powerSave.Checked;
         Settings.StartWithWindows = _autostart.Checked;
         Saved?.Invoke(_s);
         return true;

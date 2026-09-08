@@ -18,6 +18,7 @@ public enum FrameType : byte
     ReturnEdge = 10, // x(i32) y(i32) dir(1): the controlled PC's cursor left toward the controller; target in the controller's pixels
     Clipboard = 11,  // id(1) index(1) total(1) utf8 chunk
     Pong = 12,       // echo of a Ping's payload (sender's timestamp), for round-trip measurement
+    Status = 13,     // flags(1): bit0 = this PC's session is locked
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -54,6 +55,7 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     public long I64(int offset) => BinaryPrimitives.ReadInt64LittleEndian(Payload.AsSpan(offset));
 
     public static Frame Leave() => new(FrameType.Leave, []);
+    public static Frame Status(bool locked) => new(FrameType.Status, [locked ? (byte)1 : (byte)0]);
 
     public static Frame MouseMove(int dx, int dy)
     {

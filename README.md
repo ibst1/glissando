@@ -34,8 +34,16 @@ makes the mouse rubbery.
    the PC whose keyboard you are typing on always returns control locally.
    **Ctrl+Alt+L** (or the tray menu) locks the cursor to the PC you are on,
    for games, presentations or anything that lives against the shared edge;
-   press it again to unlock. The tray menu also shows the measured round
-   trip to the other PC.
+   press it again to unlock. **Ctrl+Alt+J** jumps to the middle of the other
+   PC's first screen without dragging to an edge, and back again. The tray
+   menu shows the measured round trip to the other PC, and *Copy
+   diagnostics* puts everything useful for a bug report on the clipboard.
+
+Locking the Windows session releases control on both sides; the tray
+status says when the other PC is locked, since it can only be unlocked with
+its own keyboard. *Save power when idle* (off by default) slows the
+keepalive after five minutes without input so the Bluetooth link can rest;
+the first movement after such a pause takes a little longer to arrive.
 
 There is no host and client to choose: both PCs run the same thing, and
 whichever PC's own mouse crosses the edge takes control of the other. Untick
@@ -117,6 +125,10 @@ to `%USERPROFILE%\Program\Glissando` and `dist\`:
 ```powershell
 .\build.ps1
 ```
+
+The first start of a freshly built exe takes 10 to 30 seconds while Windows
+Defender scans the new 65 MB file; every start after that takes about a
+second. Nothing is extracted to disk any more.
 
 The crossing, snapping, protocol and crypto logic has unit tests:
 

@@ -19,6 +19,9 @@ public sealed class InputCapture : IDisposable
     /// <summary>Ctrl+Alt+L was pressed: the user wants to toggle "keep the cursor on this PC".</summary>
     public event Action? LockToggleRequested;
 
+    /// <summary>Ctrl+Alt+J was pressed while local: the user wants to jump to the other PC without crossing an edge.</summary>
+    public event Action? JumpRequested;
+
     /// <summary>True while input is being forwarded to the other PC.</summary>
     public volatile bool Remote;
 
@@ -140,6 +143,11 @@ public sealed class InputCapture : IDisposable
                 LockToggleRequested?.Invoke();
                 return 1;
             }
+            if (!up && info.vkCode == Native.VK_J && Native.IsDown(Native.VK_CONTROL) && Native.IsDown(Native.VK_MENU))
+            {
+                JumpRequested?.Invoke();
+                return 1;
+            }
             return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
         }
 
@@ -156,6 +164,12 @@ public sealed class InputCapture : IDisposable
             Log.Info("lock hotkey while remote: leaving remote and locking");
             LeaveRemote(null);
             LockToggleRequested?.Invoke();
+            return 1;
+        }
+        if (!up && info.vkCode == Native.VK_J && CtrlDown() && AltDown())
+        {
+            Log.Info("jump hotkey while remote: coming back");
+            LeaveRemote(null);
             return 1;
         }
 
@@ -190,6 +204,13 @@ public sealed class InputCapture : IDisposable
     }
 
     // ---- crossing ---------------------------------------------------------------
+
+    /// <summary>Start controlling the other PC at the given point of its screen, without an edge crossing.</summary>
+    public void EnterAt(Crossing c)
+    {
+        if (Remote || !(CanEnter?.Invoke() ?? false)) return;
+        EnterRemote(c);
+    }
 
     private void EnterRemote(Crossing c)
     {

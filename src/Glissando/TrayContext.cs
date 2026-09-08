@@ -47,6 +47,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private readonly ToolStripMenuItem _lockItem;
     private SettingsForm? _openForm;
     private readonly Microsoft.Win32.PowerModeChangedEventHandler _powerHandler;
+    private readonly Microsoft.Win32.SessionSwitchEventHandler _sessionHandler;
 
     public TrayContext(Settings settings)
     {
@@ -69,6 +70,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         menu.Items.Add("Settings...", null, (_, _) => OpenSettings());
         menu.Items.Add("Reconnect", null, (_, _) => _session?.Reconnect());
         menu.Items.Add("Open log", null, (_, _) => OpenPath(Log.FilePath));
+        menu.Items.Add("Copy diagnostics", null, (_, _) => CopyDiagnostics());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => Exit());
 
@@ -101,8 +103,36 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         };
         Microsoft.Win32.SystemEvents.PowerModeChanged += _powerHandler;
 
+        // Lock screen: release whatever we hold and tell the peer.
+        _sessionHandler = (_, e) =>
+        {
+            if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionLock) _window.BeginInvoke(() => _session.SetLocalLocked(true));
+            else if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock) _window.BeginInvoke(() => _session.SetLocalLocked(false));
+        };
+        Microsoft.Win32.SystemEvents.SessionSwitch += _sessionHandler;
+
         _session.Start();
         UpdateTray();
+    }
+
+    private bool _versionWarned;
+
+    private async void CopyDiagnostics()
+    {
+        string adapter;
+        try
+        {
+            var a = await Windows.Devices.Bluetooth.BluetoothAdapter.GetDefaultAsync();
+            adapter = a == null ? "no adapter"
+                : $"{a.BluetoothAddress:X12} LE={a.IsLowEnergySupported} central={a.IsCentralRoleSupported} peripheral={a.IsPeripheralRoleSupported} extAdv={a.IsExtendedAdvertisingSupported}";
+        }
+        catch (Exception ex) { adapter = "error: " + ex.Message; }
+        try
+        {
+            Clipboard.SetText(_session.Diagnostics(adapter));
+            _tray.ShowBalloonTip(3000, "Glissando", "Diagnostics copied to the clipboard.", ToolTipIcon.Info);
+        }
+        catch (Exception ex) { Log.Warn("diagnostics: " + ex.Message); }
     }
 
     private void UpdateTray()
@@ -110,6 +140,13 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         string text = _session.StatusText;
         _status.Text = text;
         _lockItem.Checked = _session.Locked;
+        bool mismatch = _session.TransportStatus.StartsWith("other PC runs");
+        if (mismatch && !_versionWarned)
+        {
+            _versionWarned = true;
+            _tray.ShowBalloonTip(8000, "Glissando", $"The other PC runs another Glissando version. Install {Program.Version} there too.", ToolTipIcon.Warning);
+        }
+        if (_session.Authenticated) _versionWarned = false;
         _tray.Text = Trim63($"Glissando {Program.Version}: " + text);
         _tray.Icon = _session.TransportStatus.StartsWith("BLE error") ? _iconError
             : _session.Controlling ? _iconControlling
@@ -172,6 +209,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     {
         Log.Info("exiting");
         Microsoft.Win32.SystemEvents.PowerModeChanged -= _powerHandler;
+        Microsoft.Win32.SystemEvents.SessionSwitch -= _sessionHandler;
         _session.Dispose();
         _capture.Dispose();
         _tray.Visible = false;
