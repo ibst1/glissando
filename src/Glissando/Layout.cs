@@ -181,12 +181,15 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
     /// mine, nothing overlaps, and the two share at least <paramref name="minOverlap"/> pixels of edge.
     /// Also snaps the other axis to a nearby edge, so the peer can be tucked into a corner or a notch.
     /// </summary>
-    public static Point Snap(MonitorRect[] mine, MonitorRect[] peer, Point proposed, int minOverlap = 64)
+    public static Point Snap(MonitorRect[] mine, MonitorRect[] peer, Point proposed, int minOverlap = 64, int alignTolerance = 64)
     {
         if (mine.Length == 0 || peer.Length == 0) return proposed;
-        Point? best = null;
-        long bestD = long.MaxValue;
-        Dir bestSide = Dir.Right;
+
+        // Candidates: for every (my monitor, peer monitor, side) the peer sits flush against that side.
+        // The free axis is either the proposed position (clamped to keep some overlap) or aligned with
+        // an edge of one of my monitors. Aligned variants are what let the peer drop into a notch, where
+        // only the combination of both axes is free of overlap.
+        var candidates = new List<(Point o, bool aligned)>();
         foreach (var A in mine)
             foreach (var B in peer)
                 foreach (Dir side in Enum.GetValues<Dir>())
@@ -203,40 +206,41 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
                     int ov = Math.Min(minOverlap, vertical ? Math.Min(a.Height, b.Height) : Math.Min(a.Width, b.Width));
                     if (vertical) o.Y = Math.Clamp(o.Y, a.Top + ov - b.Bottom, Math.Max(a.Top + ov - b.Bottom, a.Bottom - ov - b.Y));
                     else o.X = Math.Clamp(o.X, a.Left + ov - b.Right, Math.Max(a.Left + ov - b.Right, a.Right - ov - b.X));
-                    if (Overlaps(mine, peer, o)) continue;
-                    long d = Sq(o.X - proposed.X) + Sq(o.Y - proposed.Y);
-                    if (d < bestD) { bestD = d; best = o; bestSide = side; }
+                    candidates.Add((o, false));
+
+                    foreach (var A2 in mine)
+                    {
+                        var a2 = A2.Bounds;
+                        int[] options = vertical
+                            ? [a2.Top - b.Y, a2.Bottom - b.Bottom, a2.Bottom - b.Y, a2.Top - b.Bottom]
+                            : [a2.Left - b.X, a2.Right - b.Right, a2.Right - b.X, a2.Left - b.Right];
+                        foreach (var v in options)
+                            candidates.Add((vertical ? new Point(o.X, v) : new Point(v, o.Y), true));
+                    }
                 }
-        if (best is not Point chosen)
+
+        bool Valid(Point o) => !Overlaps(mine, peer, o) && new Layout(mine, peer, o).CrossingSegments().Any();
+        long Dist(Point p, Point q) => Sq(p.X - q.X) + Sq(p.Y - q.Y);
+
+        var valid = candidates.Where(c => Valid(c.o)).Distinct().ToList();
+        if (valid.Count == 0)
         {
             var u = Union(mine); var pb = Union(peer);
             return new Point(u.Right - pb.X, proposed.Y);
         }
+        var best = valid.MinBy(c => Dist(c.o, proposed));
 
-        // Corner snap: align the free axis with a nearby edge if that still leaves a crossing.
-        bool sideVertical = bestSide is Dir.Left or Dir.Right;
-        var mu = Union(mine);
-        long tol = Math.Max(24, (long)(0.05 * Math.Max(mu.Width, mu.Height)));
-        Point cornered = chosen;
-        long cd = long.MaxValue;
-        foreach (var A in mine)
-            foreach (var B in peer)
-            {
-                var a = A.Bounds; var b = B.Bounds;
-                int[] options = sideVertical
-                    ? [a.Top - b.Y, a.Bottom - b.Bottom, a.Bottom - b.Y, a.Top - b.Bottom]
-                    : [a.Left - b.X, a.Right - b.Right, a.Right - b.X, a.Left - b.Right];
-                foreach (var v in options)
-                {
-                    var o = sideVertical ? new Point(chosen.X, v) : new Point(v, chosen.Y);
-                    long d = sideVertical ? Sq(v - chosen.Y) : Sq(v - chosen.X);
-                    if (d > tol * tol || d >= cd) continue;
-                    if (Overlaps(mine, peer, o)) continue;
-                    if (!new Layout(mine, peer, o).CrossingSegments().Any()) continue;
-                    cd = d; cornered = o;
-                }
-            }
-        return cornered;
+        // Nearby aligned position on the same side? Prefer it, so corners and edges line up when close.
+        if (!best.aligned)
+        {
+            var near = valid
+                .Where(c => c.aligned && (c.o.X == best.o.X || c.o.Y == best.o.Y))
+                .Where(c => Math.Max(Math.Abs(c.o.X - best.o.X), Math.Abs(c.o.Y - best.o.Y)) <= alignTolerance)
+                .OrderBy(c => Dist(c.o, best.o))
+                .Take(1).ToList();
+            if (near.Count == 1) best = near[0];
+        }
+        return best.o;
     }
 
     private static long Sq(long v) => v * v;

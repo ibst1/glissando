@@ -74,8 +74,13 @@ Glissando.exe --ble connect --console pin the Bluetooth role, show the log
 * Not possible without administrator rights on the controlled PC: typing into
   UAC prompts, elevated windows, or the lock screen. Unlock it with its own
   keyboard.
-* Not yet: files on the clipboard, hiding the cursor on the controlling PC,
-  absolute-position devices (tablets, RDP) as the controlling mouse.
+* Optional: hide this PC's cursor while it controls the other PC. Windows
+  offers no per-app way to hide the cursor over other programs' windows
+  without administrator rights, so this swaps the whole system cursor set
+  for blank cursors and reloads your cursor scheme when control returns
+  (also on exit or crash). Off by default; turn it on in the settings dialog.
+* Not yet: files on the clipboard, absolute-position devices (tablets, RDP)
+  as the controlling mouse.
 
 ## Security
 
@@ -111,6 +116,12 @@ to `%USERPROFILE%\Program\Glissando` and `dist\`:
 
 ```powershell
 .\build.ps1
+```
+
+The crossing, snapping, protocol and crypto logic has unit tests:
+
+```powershell
+dotnet test tests\Glissando.Tests
 ```
 
 To preview the placement dialog with a monitor layout you do not have, set

@@ -176,7 +176,8 @@ internal sealed class PlacementCanvas : Control
         var (scale, origin) = View();
         var w = ToWorld(canvasPoint, scale, origin);
         var proposed = new Point(w.X - _grab.X, w.Y - _grab.Y);
-        var snapped = Glissando.Layout.Snap(Mine, Peer, proposed);
+        // Align edges when they are within about eight canvas pixels of each other.
+        var snapped = Glissando.Layout.Snap(Mine, Peer, proposed, 64, (int)Math.Max(16, 8 / scale));
         if (snapped != _origin)
         {
             _origin = snapped;
@@ -199,6 +200,7 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _capture = new() { Text = "This PC's mouse and keyboard may control the other PC", AutoSize = true };
     private readonly CheckBox _clip = new() { Text = "Copy clipboard text across when the cursor crosses", AutoSize = true };
     private readonly CheckBox _autostart = new() { Text = "Start Glissando with Windows", AutoSize = true };
+    private readonly CheckBox _hideCursor = new() { Text = "Hide this PC's cursor while controlling the other PC (swaps the system cursors; restored on return)", AutoSize = true, MaximumSize = new Size(480, 0) };
     private readonly ComboBox _ble = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
     private readonly Label _btInfo = new() { AutoSize = true, MaximumSize = new Size(470, 0) };
     private readonly Point _originalOrigin;
@@ -216,7 +218,7 @@ internal sealed class SettingsForm : Form
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(524, 712);
+        ClientSize = new Size(524, 760);
         MinimumSize = new Size(420, 420);
         Font = new Font("Segoe UI", 9f);
         Log.Info($"settings form opening: firstRun={firstRun} peerOrigin={initial.PeerOrigin} mine={initial.Mine.Length} peer={initial.Peer.Length}");
@@ -281,8 +283,10 @@ internal sealed class SettingsForm : Form
         _capture.Checked = working.CaptureEnabled;
         _clip.Checked = working.SyncClipboard;
         _autostart.Checked = Settings.StartWithWindows;
+        _hideCursor.Checked = working.HideCursorWhileControlling;
         layout.Controls.Add(_capture);
         layout.Controls.Add(_clip);
+        layout.Controls.Add(_hideCursor);
         layout.Controls.Add(_autostart);
 
         var bleRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 6, 0, 8) };
@@ -364,6 +368,7 @@ internal sealed class SettingsForm : Form
         }
         _s.CaptureEnabled = _capture.Checked;
         _s.SyncClipboard = _clip.Checked;
+        _s.HideCursorWhileControlling = _hideCursor.Checked;
         Settings.StartWithWindows = _autostart.Checked;
         Saved?.Invoke(_s);
         return true;

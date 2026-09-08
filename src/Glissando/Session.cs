@@ -88,8 +88,13 @@ public sealed class Session : IDisposable
         _channel.StatusChanged += st => { TransportStatus = st; StateChanged?.Invoke(); };
 
         _capture.Output += Enqueue;
-        _capture.EnteredRemote += () => { StateChanged?.Invoke(); if (_s.SyncClipboard) SendClipboard(); };
-        _capture.LeftRemote += () => StateChanged?.Invoke();
+        _capture.EnteredRemote += () =>
+        {
+            if (_s.HideCursorWhileControlling) CursorHider.Hide();
+            StateChanged?.Invoke();
+            if (_s.SyncClipboard) SendClipboard();
+        };
+        _capture.LeftRemote += () => { CursorHider.Restore(); StateChanged?.Invoke(); };
         _capture.LockToggleRequested += () => SetLocked(!Locked);
 
         _injector.StateChanged += () => StateChanged?.Invoke();
@@ -402,6 +407,7 @@ public sealed class Session : IDisposable
     public void Dispose()
     {
         _capture.Release();
+        CursorHider.Restore();
         _injector.Deactivate();
         _cts.Cancel();
         _queue.Writer.TryComplete();

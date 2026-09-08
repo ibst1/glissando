@@ -34,6 +34,9 @@ public sealed class Settings
     /// <summary>Copy clipboard text across when the cursor crosses over.</summary>
     public bool SyncClipboard { get; set; } = true;
 
+    /// <summary>Swap the system cursors for blank ones while this PC controls the other; restored on return.</summary>
+    public bool HideCursorWhileControlling { get; set; }
+
     /// <summary>Ping interval while linked. Keeps the BLE connection interval short.</summary>
     public int KeepaliveMs { get; set; } = 1000;
 

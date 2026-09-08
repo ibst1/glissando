@@ -141,6 +141,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _settings.PlacementUpdated = working.PlacementUpdated;
         _settings.CaptureEnabled = working.CaptureEnabled;
         _settings.SyncClipboard = working.SyncClipboard;
+        _settings.HideCursorWhileControlling = working.HideCursorWhileControlling;
         try { _settings.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
         Log.Info($"settings saved: ble={_settings.Ble} peer origin=({_settings.PeerX},{_settings.PeerY}) capture={_settings.CaptureEnabled}");
 

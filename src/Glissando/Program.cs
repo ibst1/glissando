@@ -20,6 +20,12 @@ internal static class Program
             {
                 case "--console": console = true; break;
                 case "--setup": setup = true; break;
+                case "--cursor-test":
+                    // Hidden: blank the system cursors for two seconds and restore them, to check the mechanism.
+                    Host.CursorHider.Hide();
+                    Thread.Sleep(2000);
+                    Host.CursorHider.Restore();
+                    return 0;
                 case "--settings": settingsPath = Next(args, ref i); break;
                 case "--ble": overrides["ble"] = Next(args, ref i); break;
                 case "--help":
@@ -44,6 +50,10 @@ internal static class Program
 
         Native.timeBeginPeriod(1);
         ApplicationConfiguration.Initialize();
+
+        // If the cursor set was swapped out while controlling the other PC, put it back no matter how we end.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => Host.CursorHider.Restore();
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => Host.CursorHider.Restore();
 
         // One instance per user. Wait a little so "restart" from the settings dialog works.
         using var single = new Mutex(false, "Glissando-" + Environment.UserName);
@@ -77,6 +87,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
+            Host.CursorHider.Restore();
             Log.Error("fatal: " + ex);
             MessageBox.Show(ex.ToString(), "Glissando crashed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 2;
