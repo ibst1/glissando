@@ -1,0 +1,9 @@
+bin/
+obj/
+dist/
+*.user
+*.suo
+.vs/
+*.log
+*.txt
+!README*.txt
