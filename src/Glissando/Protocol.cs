@@ -17,6 +17,7 @@ public enum FrameType : byte
     Leave = 9,       // controller released control; the controlled PC releases all keys and buttons
     ReturnEdge = 10, // x(i32) y(i32) dir(1): the controlled PC's cursor left toward the controller; target in the controller's pixels
     Clipboard = 11,  // id(1) index(1) total(1) utf8 chunk
+    Pong = 12,       // echo of a Ping's payload (sender's timestamp), for round-trip measurement
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -41,7 +42,17 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     public ushort U16(int offset) => BinaryPrimitives.ReadUInt16LittleEndian(Payload.AsSpan(offset));
     public int I32(int offset) => BinaryPrimitives.ReadInt32LittleEndian(Payload.AsSpan(offset));
 
-    public static Frame Ping() => new(FrameType.Ping, []);
+    /// <summary>Ping carries the sender's Stopwatch timestamp; the peer echoes it in a Pong.</summary>
+    public static Frame Ping(long timestamp)
+    {
+        var p = new byte[8];
+        BinaryPrimitives.WriteInt64LittleEndian(p, timestamp);
+        return new(FrameType.Ping, p);
+    }
+
+    public static Frame Pong(byte[] pingPayload) => new(FrameType.Pong, pingPayload);
+    public long I64(int offset) => BinaryPrimitives.ReadInt64LittleEndian(Payload.AsSpan(offset));
+
     public static Frame Leave() => new(FrameType.Leave, []);
 
     public static Frame MouseMove(int dx, int dy)

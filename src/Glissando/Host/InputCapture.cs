@@ -16,6 +16,9 @@ public sealed class InputCapture : IDisposable
     public event Action? EnteredRemote;
     public event Action? LeftRemote;
 
+    /// <summary>Ctrl+Alt+L was pressed: the user wants to toggle "keep the cursor on this PC".</summary>
+    public event Action? LockToggleRequested;
+
     /// <summary>True while input is being forwarded to the other PC.</summary>
     public volatile bool Remote;
 
@@ -124,16 +127,35 @@ public sealed class InputCapture : IDisposable
 
     private IntPtr KeyHook(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode < 0 || !Remote) return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
+        if (nCode < 0) return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
         var info = Marshal.PtrToStructure<Native.KBDLLHOOKSTRUCT>(lParam);
         bool up = (info.flags & Native.LLKHF_UP) != 0;
         bool ext = (info.flags & Native.LLKHF_EXTENDED) != 0;
+
+        if (!Remote)
+        {
+            // Local mode: only the lock hotkey is ours. Modifier state is real here (nothing is swallowed).
+            if (!up && info.vkCode == Native.VK_L && Native.IsDown(Native.VK_CONTROL) && Native.IsDown(Native.VK_MENU))
+            {
+                LockToggleRequested?.Invoke();
+                return 1;
+            }
+            return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
+        }
+
         var key = ((ushort)info.vkCode, (ushort)info.scanCode, ext);
 
         if (!up && info.vkCode == Native.VK_ESCAPE && CtrlDown() && AltDown())
         {
             Log.Info("escape hotkey: leaving remote");
             LeaveRemote(null);
+            return 1;
+        }
+        if (!up && info.vkCode == Native.VK_L && CtrlDown() && AltDown())
+        {
+            Log.Info("lock hotkey while remote: leaving remote and locking");
+            LeaveRemote(null);
+            LockToggleRequested?.Invoke();
             return 1;
         }
 

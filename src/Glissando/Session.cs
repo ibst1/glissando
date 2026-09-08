@@ -32,6 +32,12 @@ public sealed class Session : IDisposable
     public bool Controlling => _capture.Remote;
     public bool Controlled => _injector.Active;
 
+    /// <summary>User asked to keep the cursor on this PC (Ctrl+Alt+L or the tray menu). Not persisted.</summary>
+    public bool Locked { get; private set; }
+
+    /// <summary>Latest measured round trip to the peer in milliseconds, 0 until a pong has arrived.</summary>
+    public double RttMs { get; private set; }
+
     private readonly Settings _s;
     private readonly IChannel _channel;
     private readonly InputCapture _capture;
@@ -53,7 +59,26 @@ public sealed class Session : IDisposable
         _capture = capture;
         _injector = injector;
         _clipboard = clipboard;
-        _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !_injector.Active;
+        _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !_injector.Active;
+    }
+
+    public void SetLocked(bool locked)
+    {
+        if (Locked == locked) return;
+        Locked = locked;
+        if (locked) _capture.Release();
+        Log.Info(locked ? "cursor locked to this PC" : "cursor unlocked");
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>The machine woke up: Bluetooth state is suspect, so drop and re-establish the link.</summary>
+    public void Resume()
+    {
+        Log.Info("system resumed; re-establishing the link");
+        SetAuthenticated(false);
+        RttMs = 0;
+        _channel.Reconnect();
+        StateChanged?.Invoke();
     }
 
     public void Start()
@@ -65,6 +90,7 @@ public sealed class Session : IDisposable
         _capture.Output += Enqueue;
         _capture.EnteredRemote += () => { StateChanged?.Invoke(); if (_s.SyncClipboard) SendClipboard(); };
         _capture.LeftRemote += () => StateChanged?.Invoke();
+        _capture.LockToggleRequested += () => SetLocked(!Locked);
 
         _injector.StateChanged += () => StateChanged?.Invoke();
         _injector.ReturnEdgeHit += back =>
@@ -109,6 +135,7 @@ public sealed class Session : IDisposable
     private void OnLinkChanged(bool up)
     {
         Log.Info(up ? $"link up ({(_channel.IsCentral ? "central" : "peripheral")})" : "link down");
+        RttMs = 0;
         if (up)
         {
             var old = _crypto;
@@ -181,6 +208,20 @@ public sealed class Session : IDisposable
                 break;
 
             case FrameType.Ping:
+                Enqueue(Frame.Pong(f.Payload));
+                break;
+
+            case FrameType.Pong:
+                if (f.Payload.Length >= 8)
+                {
+                    double rtt = (Stopwatch.GetTimestamp() - f.I64(0)) * 1000.0 / Stopwatch.Frequency;
+                    if (rtt >= 0 && rtt < 10_000)
+                    {
+                        // Light smoothing so the tray text does not flicker.
+                        RttMs = RttMs == 0 ? rtt : RttMs * 0.7 + rtt * 0.3;
+                        StateChanged?.Invoke();
+                    }
+                }
                 break;
 
             case FrameType.ReturnEdge:
@@ -295,7 +336,7 @@ public sealed class Session : IDisposable
                     SetAuthenticated(false);
                 }
                 if (!Authenticated && sinceHello > 2000) SendHello();
-                else if (sinceSend > _s.KeepaliveMs) Enqueue(Frame.Ping());
+                else if (sinceSend > _s.KeepaliveMs) Enqueue(Frame.Ping(now));
             }
         }
         catch (OperationCanceledException) { }
@@ -348,11 +389,13 @@ public sealed class Session : IDisposable
         {
             if (!Linked) return $"Looking for the other PC ({TransportStatus})";
             if (!Authenticated) return TransportStatus.StartsWith("other PC runs") ? TransportStatus : "Linked, authenticating (do both passphrases match?)";
-            if (Controlling) return $"Controlling {PeerName}";
-            if (Controlled) return $"{PeerName} is controlling this PC";
+            string rtt = RttMs > 0 ? $", {RttMs:F0} ms" : "";
+            if (Controlling) return $"Controlling {PeerName}{rtt}";
+            if (Controlled) return $"{PeerName} is controlling this PC{rtt}";
+            if (Locked) return $"Cursor locked to this PC (Ctrl+Alt+L unlocks){rtt}";
             return _s.CaptureEnabled
-                ? $"Ready, linked to {PeerName}"
-                : $"Ready, linked to {PeerName} (this PC does not take control)";
+                ? $"Ready, linked to {PeerName}{rtt}"
+                : $"Ready, linked to {PeerName}{rtt} (this PC does not take control)";
         }
     }
 

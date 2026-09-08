@@ -134,12 +134,13 @@ public sealed class BlePeripheralChannel : IChannel
 
     public void Reconnect()
     {
-        // Nothing to tear down from the peripheral side; the central owns the connection.
+        // The central owns the connection; all we can do is make sure we are really advertising.
+        // After sleep Windows may still report Started while nothing is on the air, so restart it.
         var p = _provider;
-        if (p != null && p.AdvertisementStatus != GattServiceProviderAdvertisementStatus.Started)
-        {
-            try { p.StartAdvertising(_advParams); } catch (Exception ex) { Log.Error("StartAdvertising: " + ex.Message); }
-        }
+        if (p == null) return;
+        try { p.StopAdvertising(); } catch { }
+        try { p.StartAdvertising(_advParams); Log.Info("BLE advertising restarted"); }
+        catch (Exception ex) { Log.Error("StartAdvertising: " + ex.Message); }
     }
 
     public void Dispose()

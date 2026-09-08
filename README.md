@@ -32,6 +32,10 @@ makes the mouse rubbery.
    authenticated. Push the cursor against the shared edge to cross over, and
    against the same edge on the other PC to come back. **Ctrl+Alt+Esc** on
    the PC whose keyboard you are typing on always returns control locally.
+   **Ctrl+Alt+L** (or the tray menu) locks the cursor to the PC you are on,
+   for games, presentations or anything that lives against the shared edge;
+   press it again to unlock. The tray menu also shows the measured round
+   trip to the other PC.
 
 There is no host and client to choose: both PCs run the same thing, and
 whichever PC's own mouse crosses the edge takes control of the other. Untick

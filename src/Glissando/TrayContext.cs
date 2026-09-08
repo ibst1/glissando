@@ -43,8 +43,10 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private readonly Session _session;
     private readonly InputCapture _capture;
     private readonly InputInjector _injector;
-    private readonly Icon _iconIdle, _iconReady, _iconControlling, _iconControlled, _iconError;
+    private readonly Icon _iconIdle, _iconReady, _iconControlling, _iconControlled, _iconLocked, _iconError;
+    private readonly ToolStripMenuItem _lockItem;
     private SettingsForm? _openForm;
+    private readonly Microsoft.Win32.PowerModeChangedEventHandler _powerHandler;
 
     public TrayContext(Settings settings)
     {
@@ -53,13 +55,17 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _iconReady = TrayIcons.Make(Color.FromArgb(76, 175, 80));
         _iconControlling = TrayIcons.Make(Color.FromArgb(66, 133, 244));
         _iconControlled = TrayIcons.Make(Color.FromArgb(255, 152, 0));
+        _iconLocked = TrayIcons.Make(Color.FromArgb(171, 71, 188));
         _iconError = TrayIcons.Make(Color.FromArgb(229, 57, 53));
 
         _status = new ToolStripMenuItem("Starting") { Enabled = false };
+        _lockItem = new ToolStripMenuItem("Lock cursor to this PC") { ShortcutKeyDisplayString = "Ctrl+Alt+L", CheckOnClick = true };
+        _lockItem.Click += (_, _) => _session?.SetLocked(_lockItem.Checked);
         var menu = new ContextMenuStrip();
         menu.Items.Add(new ToolStripMenuItem($"Glissando {Program.Version}") { Enabled = false });
         menu.Items.Add(_status);
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(_lockItem);
         menu.Items.Add("Settings...", null, (_, _) => OpenSettings());
         menu.Items.Add("Reconnect", null, (_, _) => _session?.Reconnect());
         menu.Items.Add("Open log", null, (_, _) => OpenPath(Log.FilePath));
@@ -87,6 +93,14 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _session = new Session(settings, channel, _capture, _injector, this);
         _session.StateChanged += () => _window.BeginInvoke(UpdateTray);
         _session.SettingsChanged += () => _window.BeginInvoke(() => _openForm?.Reload(_settings, _session.PeerName));
+
+        // After sleep the Bluetooth stack often needs a nudge.
+        _powerHandler = (_, e) =>
+        {
+            if (e.Mode == Microsoft.Win32.PowerModes.Resume) _window.BeginInvoke(() => _session.Resume());
+        };
+        Microsoft.Win32.SystemEvents.PowerModeChanged += _powerHandler;
+
         _session.Start();
         UpdateTray();
     }
@@ -95,10 +109,12 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     {
         string text = _session.StatusText;
         _status.Text = text;
+        _lockItem.Checked = _session.Locked;
         _tray.Text = Trim63($"Glissando {Program.Version}: " + text);
         _tray.Icon = _session.TransportStatus.StartsWith("BLE error") ? _iconError
             : _session.Controlling ? _iconControlling
             : _session.Controlled ? _iconControlled
+            : _session.Locked ? _iconLocked
             : _session.Authenticated ? _iconReady
             : _iconIdle;
     }
@@ -154,6 +170,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private void Exit()
     {
         Log.Info("exiting");
+        Microsoft.Win32.SystemEvents.PowerModeChanged -= _powerHandler;
         _session.Dispose();
         _capture.Dispose();
         _tray.Visible = false;

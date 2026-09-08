@@ -18,6 +18,8 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <!-- Roughly halves the self-contained single-file exe; costs a little at start-up. -->
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
 </Project>
