@@ -363,7 +363,12 @@ public sealed class Session : IDisposable
                 break;
 
             case FrameType.ControlAlive:
-                if (Authenticated && _injector.Active) _injector.KeepAlive();
+                if (!Authenticated) break;
+                if (_injector.Active) _injector.KeepAlive();
+                // The other PC thinks it is controlling us, but we are not being controlled (its Leave or
+                // our ReturnEdge was lost). Tell it to release, so the two sides cannot deadlock with one
+                // stuck "controlling" and thereby blocking the other direction.
+                else Enqueue(new Frame(FrameType.Detached, []));
                 break;
 
             case FrameType.Status:
