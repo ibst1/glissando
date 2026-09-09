@@ -36,7 +36,6 @@ public sealed class InputCapture : IDisposable
     private IntPtr _mouseHook, _keyHook;
     private Rectangle _screen;
     private long _ignoreEdgeUntil;
-    private int _rawDx, _rawDy; // last physical movement seen while local: disambiguates corners
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _keysDown = [];
     private readonly HashSet<byte> _buttonsDown = [];
     private readonly byte[] _rawBuf = new byte[128];
@@ -87,20 +86,9 @@ public sealed class InputCapture : IDisposable
         int msg = (int)wParam;
         var info = Marshal.PtrToStructure<Native.MSLLHOOKSTRUCT>(lParam);
 
-        if (!Remote)
-        {
-            if (msg == Native.WM_MOUSEMOVE && (info.flags & Native.LLMHF_INJECTED) == 0
-                && Stopwatch.GetTimestamp() > _ignoreEdgeUntil && (CanEnter?.Invoke() ?? false))
-            {
-                var c = Layout.FindCrossing(ToLocal(info.pt), _rawDx, _rawDy);
-                if (c != null)
-                {
-                    EnterRemote(c.Value);
-                    return 1;
-                }
-            }
-            return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
-        }
+        // Crossing is detected from raw input (OnRawInput), which keeps firing when Windows has
+        // clamped the cursor against the edge and the hook has stopped reporting new positions.
+        if (!Remote) return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
 
         switch (msg)
         {
@@ -197,9 +185,22 @@ public sealed class InputCapture : IDisposable
         int dx = BinaryPrimitives.ReadInt32LittleEndian(_rawBuf.AsSpan(m + 12));
         int dy = BinaryPrimitives.ReadInt32LittleEndian(_rawBuf.AsSpan(m + 16));
         if (dx == 0 && dy == 0) return;
-        if (!Remote) { _rawDx = dx; _rawDy = dy; return; }
+        if (!Remote) { TryCross(dx, dy); return; }
         Interlocked.Increment(ref MovesForwarded);
         Output?.Invoke(Frame.MouseMove(dx, dy));
+    }
+
+    /// <summary>
+    /// A raw mouse delta arrived while local. If the cursor now sits on an edge that leads to the other
+    /// PC and the motion points into it, cross. Reading the position here (not in the LL hook) means the
+    /// push is seen even while the cursor is pinned to the edge, so crossing is not timing-sensitive.
+    /// </summary>
+    private void TryCross(int dx, int dy)
+    {
+        if (Remote || Stopwatch.GetTimestamp() < _ignoreEdgeUntil) return;
+        if (!(CanEnter?.Invoke() ?? false)) return;
+        if (!Native.GetCursorPos(out var cur)) return;
+        if (Layout.FindCrossing(ToLocal(cur), dx, dy) is Crossing c) EnterRemote(c);
     }
 
     /// <summary>Mouse-move frames produced while remote (diagnostics).</summary>
