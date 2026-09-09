@@ -168,7 +168,7 @@ public sealed class Session : IDisposable
         _channel.LinkChanged += OnLinkChanged;
         _channel.StatusChanged += st => { TransportStatus = st; StateChanged?.Invoke(); };
 
-        _capture.Output += Enqueue;
+        _capture.Output += OnCaptured;
         _capture.EnteredRemote += () =>
         {
             if (_s.HideCursorWhileControlling) CursorHider.Hide();
@@ -235,6 +235,8 @@ public sealed class Session : IDisposable
     {
         Log.Info(up ? $"link up ({(_channel.IsCentral ? "central" : "peripheral")})" : "link down");
         RttMs = 0;
+        // The peer may have restarted and reset its key sequence, so forget which we have seen.
+        lock (_rxGate) { _dedupSeen.Clear(); _dedupOrder.Clear(); }
         if (up)
         {
             var old = _crypto;
@@ -303,6 +305,8 @@ public sealed class Session : IDisposable
         }
         if (!Frame.TryDecode(plain, out var f)) return;
         _lastPeer = Stopwatch.GetTimestamp();
+
+        if (IsDuplicate(f)) return; // a redundant copy of a key/button we already applied
 
         switch (f.Type)
         {
@@ -437,6 +441,38 @@ public sealed class Session : IDisposable
     }
 
     // ---- sending -----------------------------------------------------------------
+
+    // Keys and buttons are rare and must not be lost on the unreliable BLE link: a dropped key-up sticks a
+    // key, a dropped arrow is a missed press. Send each a few times with a sequence id appended, and drop
+    // duplicates on the far side. Mouse moves are not made reliable -- losing one delta is invisible.
+    private const int KeyRedundancy = 3;
+    private ushort _keySeq;
+    private readonly Queue<ushort> _dedupOrder = new();
+    private readonly HashSet<ushort> _dedupSeen = [];
+
+    private static bool IsReliable(FrameType t) => t is FrameType.Key or FrameType.MouseButton;
+
+    private void OnCaptured(Frame f)
+    {
+        if (!IsReliable(f.Type)) { Enqueue(f); return; }
+        ushort seq = ++_keySeq;
+        var p = new byte[f.Payload.Length + 2];
+        f.Payload.CopyTo(p, 0);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(f.Payload.Length), seq);
+        var rel = new Frame(f.Type, p);
+        for (int i = 0; i < KeyRedundancy; i++) Enqueue(rel);
+    }
+
+    /// <summary>True if this reliable frame is a duplicate copy already applied.</summary>
+    private bool IsDuplicate(Frame f)
+    {
+        if (!IsReliable(f.Type) || f.Payload.Length < 2) return false;
+        ushort seq = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(f.Payload.AsSpan(f.Payload.Length - 2));
+        if (!_dedupSeen.Add(seq)) return true;
+        _dedupOrder.Enqueue(seq);
+        if (_dedupOrder.Count > 512) _dedupSeen.Remove(_dedupOrder.Dequeue());
+        return false;
+    }
 
     private void Enqueue(Frame f)
     {

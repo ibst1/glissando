@@ -160,7 +160,12 @@ public sealed class InputCapture : IDisposable
             return 1;
         }
 
-        if (up) _keysDown.Remove(key); else _keysDown.Add(key);
+        bool repeat = false;
+        if (up) _keysDown.Remove(key);
+        else repeat = !_keysDown.Add(key); // HashSet.Add returns false when the key was already held
+        // A held modifier auto-repeats its down event ~30x/s; forwarding that floods the link for no gain,
+        // since the modifier is already down on the other PC. Other keys must repeat so holding them repeats.
+        if (repeat && Native.IsModifierVk(info.vkCode)) return 1;
         Output?.Invoke(Frame.Key(key.Item1, key.Item2, up, ext));
         return 1;
     }

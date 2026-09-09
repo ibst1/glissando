@@ -41,6 +41,11 @@ internal static class Native
 
     public static bool IsDown(int vKey) => (GetAsyncKeyState(vKey) & 0x8000) != 0;
 
+    /// <summary>Shift/Ctrl/Alt/Win and the lock keys: holding these auto-repeats uselessly and should not be re-sent.</summary>
+    public static bool IsModifierVk(uint vk) => vk is 0x10 or 0x11 or 0x12          // generic Shift/Ctrl/Alt
+        or VK_LSHIFT or VK_RSHIFT or VK_LCONTROL or VK_RCONTROL or VK_LMENU or VK_RMENU
+        or VK_LWIN or VK_RWIN or 0x14 or 0x90 or 0x91;                              // Win, CapsLock, NumLock, ScrollLock
+
     public const int SM_XVIRTUALSCREEN = 76, SM_YVIRTUALSCREEN = 77, SM_CXVIRTUALSCREEN = 78, SM_CYVIRTUALSCREEN = 79;
 
     /// <summary>Marks input injected by Glissando (dwExtraInfo).</summary>
