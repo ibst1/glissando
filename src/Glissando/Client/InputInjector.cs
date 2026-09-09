@@ -121,12 +121,25 @@ public sealed class InputInjector
 
     private void Key(ushort vk, ushort scan, bool up, bool ext)
     {
-        uint flags = up ? Native.KEYEVENTF_KEYUP : 0;
-        if (ext) flags |= Native.KEYEVENTF_EXTENDEDKEY;
-        if (scan != 0) { flags |= Native.KEYEVENTF_SCANCODE; vk = 0; }
         var key = (vk, scan, ext);
         if (up) _keysDown.Remove(key); else _keysDown.Add(key);
-        Native.Send(Native.Keyboard(vk, scan, flags));
+        SendKey(vk, scan, up, ext);
+    }
+
+    /// <summary>
+    /// Inject a key. Prefer the virtual-key code: injecting Shift/Ctrl/Alt by scancode alone does not
+    /// reliably update the modifier state the OS applies to the following key, so capitals and Ctrl+C/V
+    /// were lost. Both PCs are expected to share a keyboard layout, so the vk is meaningful. Fall back to
+    /// the scancode only when there is no vk.
+    /// </summary>
+    private static void SendKey(ushort vk, ushort scan, bool up, bool ext)
+    {
+        uint flags = up ? Native.KEYEVENTF_KEYUP : 0;
+        if (ext) flags |= Native.KEYEVENTF_EXTENDEDKEY;
+        if (vk != 0)
+            Native.Send(Native.Keyboard(vk, scan, flags));
+        else
+            Native.Send(Native.Keyboard(0, scan, flags | Native.KEYEVENTF_SCANCODE));
     }
 
     /// <summary>Release anything still held so nothing sticks when the other PC goes away.</summary>
@@ -135,10 +148,7 @@ public sealed class InputInjector
         lock (_gate)
         {
             foreach (var k in _keysDown.ToArray())
-            {
-                uint flags = Native.KEYEVENTF_KEYUP | (k.ext ? Native.KEYEVENTF_EXTENDEDKEY : 0) | (k.scan != 0 ? Native.KEYEVENTF_SCANCODE : 0);
-                Native.Send(Native.Keyboard(k.vk, k.scan, flags));
-            }
+                SendKey(k.vk, k.scan, up: true, k.ext);
             _keysDown.Clear();
             foreach (var b in _buttonsDown.ToArray()) Button(b, false);
             _buttonsDown.Clear();
