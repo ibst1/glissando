@@ -1,7 +1,5 @@
-using System.Threading.Channels;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
-using Windows.Foundation;
 using Windows.Storage.Streams;
 
 namespace Glissando.Transport;
@@ -23,11 +21,6 @@ public sealed class BlePeripheralChannel : IChannel
     private GattLocalCharacteristic? _rx, _tx;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly GattServiceProviderAdvertisingParameters _advParams = new() { IsConnectable = true, IsDiscoverable = true };
-
-    // Write requests are raised in order, but awaiting GetRequestAsync inside the handler lets two of
-    // them race and finish swapped. Queue them and let one consumer read them strictly in sequence.
-    private readonly Channel<(GattWriteRequestedEventArgs args, Deferral deferral)> _writes =
-        Channel.CreateUnbounded<(GattWriteRequestedEventArgs, Deferral)>(new UnboundedChannelOptions { SingleReader = true });
 
     public async Task RunAsync(CancellationToken ct)
     {
@@ -68,7 +61,6 @@ public sealed class BlePeripheralChannel : IChannel
 
         _provider.StartAdvertising(_advParams);
         StatusChanged?.Invoke("advertising");
-        _ = Task.Run(() => ProcessWritesAsync(ct));
 
         // Windows sometimes reports Aborted right after StartAdvertising and, on some
         // machines, never recovers on its own. Poke it until it sticks.
@@ -92,36 +84,23 @@ public sealed class BlePeripheralChannel : IChannel
         StatusChanged?.Invoke("BLE error: " + why);
     }
 
-    private void OnWriteRequested(GattLocalCharacteristic sender, GattWriteRequestedEventArgs args)
+    private async void OnWriteRequested(GattLocalCharacteristic sender, GattWriteRequestedEventArgs args)
     {
-        // Take the deferral synchronously; the consumer completes it once the packet has been handled in order.
-        _writes.Writer.TryWrite((args, args.GetDeferral()));
-    }
-
-    private async Task ProcessWritesAsync(CancellationToken ct)
-    {
-        var reader = _writes.Reader;
+        // Handle each write concurrently so throughput keeps up with a fast mouse. Reordering a few
+        // packets is harmless: a swapped mouse delta is invisible, and a late Enter is covered by the
+        // Detached delay and the post-control edge suppression in Session.
+        var deferral = args.GetDeferral();
         try
         {
-            while (await reader.WaitToReadAsync(ct))
-            {
-                while (reader.TryRead(out var item))
-                {
-                    try
-                    {
-                        var req = await item.args.GetRequestAsync();
-                        if (req == null) continue;
-                        if (req.Option == GattWriteOption.WriteWithResponse) req.Respond();
-                        var data = new byte[req.Value.Length];
-                        DataReader.FromBuffer(req.Value).ReadBytes(data);
-                        Received?.Invoke(data);
-                    }
-                    catch (Exception ex) { Log.Error("BLE write handler: " + ex.Message); }
-                    finally { item.deferral.Complete(); }
-                }
-            }
+            var req = await args.GetRequestAsync();
+            if (req == null) return;
+            if (req.Option == GattWriteOption.WriteWithResponse) req.Respond();
+            var data = new byte[req.Value.Length];
+            DataReader.FromBuffer(req.Value).ReadBytes(data);
+            Received?.Invoke(data);
         }
-        catch (OperationCanceledException) { }
+        catch (Exception ex) { Log.Error("BLE write handler: " + ex.Message); }
+        finally { deferral.Complete(); }
     }
 
     private void OnSubscribedClientsChanged(GattLocalCharacteristic sender, object args)
