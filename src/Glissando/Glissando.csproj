@@ -20,6 +20,8 @@
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <!-- Roughly halves the self-contained single-file exe; costs a little at start-up. -->
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- build.ps1 sets InformationalVersion to 0.3.N+shorthash itself; stop the SDK appending the full SHA. -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
