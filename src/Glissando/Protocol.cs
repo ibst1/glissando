@@ -107,8 +107,10 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     {
         var nameBytes = Encoding.UTF8.GetBytes(h.Name);
         if (nameBytes.Length > 64) nameBytes = nameBytes[..64];
+        var versionBytes = Encoding.UTF8.GetBytes(h.AppVersion ?? "");
+        if (versionBytes.Length > 40) versionBytes = versionBytes[..40];
         var monitors = h.Monitors.Take(HelloInfo.MaxMonitors).ToArray();
-        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + nameBytes.Length];
+        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + 1 + versionBytes.Length + nameBytes.Length];
         p[0] = HelloInfo.Version;
         p[1] = (byte)(h.CaptureEnabled ? 1 : 0);
         BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(2), h.PeerOrigin.X);
@@ -128,6 +130,9 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
             p[o + 16] = (byte)Math.Clamp(m.Number, 0, 255);
             o += HelloInfo.MonitorSize;
         }
+        p[o++] = (byte)versionBytes.Length;
+        versionBytes.CopyTo(p, o);
+        o += versionBytes.Length;
         nameBytes.CopyTo(p, o);
         return new(FrameType.Hello, p);
     }
@@ -157,9 +162,9 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
 /// is where the sender believes the receiver's origin sits, in the sender's pixels; placements are
 /// compared by timestamp so that whichever PC was configured last wins. Monitors are the sender's own.
 /// </summary>
-public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Screen, long PlacementUpdated, byte[] Nonce, MonitorRect[] Monitors, string Name)
+public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Screen, long PlacementUpdated, byte[] Nonce, MonitorRect[] Monitors, string Name, string AppVersion = "")
 {
-    public const byte Version = 3;
+    public const byte Version = 4;
     public const int FixedSize = 1 + 1 + 4 + 4 + 2 + 2 + 8 + 16 + 1;
     public const int MonitorSize = 17;
     public const int MaxMonitors = 16;
@@ -170,7 +175,7 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
         if (f.Type != FrameType.Hello || p.Length < FixedSize || p[0] != Version) return null;
         int count = p[38];
         int o = FixedSize;
-        if (p.Length < o + count * MonitorSize) return null;
+        if (p.Length < o + count * MonitorSize + 1) return null;
         var monitors = new MonitorRect[count];
         for (int i = 0; i < count; i++, o += MonitorSize)
             monitors[i] = new MonitorRect(new Rectangle(
@@ -178,6 +183,10 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
                 BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(o + 4)),
                 BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(o + 8)),
                 BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(o + 12))), p[o + 16]);
+        int versionLen = p[o++];
+        if (p.Length < o + versionLen) return null;
+        string appVersion = Encoding.UTF8.GetString(p, o, versionLen);
+        o += versionLen;
         return new HelloInfo(
             p[1] != 0,
             new Point(BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(2)), BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(6))),
@@ -185,7 +194,8 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
             BinaryPrimitives.ReadInt64LittleEndian(p.AsSpan(14)),
             p.AsSpan(22, 16).ToArray(),
             monitors,
-            Encoding.UTF8.GetString(p, o, p.Length - o));
+            Encoding.UTF8.GetString(p, o, p.Length - o),
+            appVersion);
     }
 }
 

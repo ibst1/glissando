@@ -4,8 +4,21 @@ namespace Glissando;
 
 internal static class Program
 {
-    public static string Version { get; } =
-        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
+    /// <summary>Short build id, e.g. "0.3.7+dc7d57e" (set by build.ps1; "0.3.0" for a plain IDE build).</summary>
+    public static string Version { get; } = ComputeVersion(false);
+
+    /// <summary>Build id with the build time, for humans.</summary>
+    public static string VersionLong { get; } = ComputeVersion(true);
+
+    private static string ComputeVersion(bool withTime)
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                   ?? asm.GetName().Version?.ToString(3) ?? "0.0.0";
+        if (!withTime) return info;
+        var time = asm.GetCustomAttributes<AssemblyMetadataAttribute>().FirstOrDefault(a => a.Key == "BuildTime")?.Value;
+        return string.IsNullOrEmpty(time) ? info : $"{info} ({time})";
+    }
 
     [STAThread]
     private static int Main(string[] args)

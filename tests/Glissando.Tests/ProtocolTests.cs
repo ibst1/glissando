@@ -14,7 +14,7 @@ public class ProtocolTests
             new(new Rectangle(0, 1200, 2560, 1440), 1),
             new(new Rectangle(2560, 0, 1920, 1200), 4),
         ];
-        var info = new HelloInfo(true, new Point(-640, 0), new Size(7680, 2640), 1234567890123, nonce, monitors, "Lärkan");
+        var info = new HelloInfo(true, new Point(-640, 0), new Size(7680, 2640), 1234567890123, nonce, monitors, "Lärkan", "0.3.9+abc1234.dirty");
 
         var frame = Frame.Hello(info);
         Assert.True(Frame.TryDecode(frame.Encode(), out var decoded));
@@ -28,6 +28,17 @@ public class ProtocolTests
         Assert.Equal(info.Nonce, parsed.Nonce);
         Assert.Equal(monitors, parsed.Monitors);
         Assert.Equal("Lärkan", parsed.Name);
+        Assert.Equal("0.3.9+abc1234.dirty", parsed.AppVersion);
+    }
+
+    [Fact]
+    public void Hello_WithoutMonitorsOrVersion_StillParses()
+    {
+        var frame = Frame.Hello(new HelloInfo(false, Point.Empty, new Size(1, 1), 0, new byte[16], [], "x"));
+        var parsed = HelloInfo.Parse(frame);
+        Assert.NotNull(parsed);
+        Assert.Equal("x", parsed!.Name);
+        Assert.Equal("", parsed.AppVersion);
     }
 
     [Fact]

@@ -29,6 +29,9 @@ public sealed class Session : IDisposable
     public bool Linked => _channel.IsLinked;
     public bool Authenticated { get; private set; }
     public string PeerName { get; private set; } = "";
+
+    /// <summary>The other PC's build id from its Hello, e.g. "0.3.8+1a2b3c4".</summary>
+    public string PeerVersion { get; private set; } = "";
     public bool Controlling => _capture.Remote;
     public bool Controlled => _injector.Active;
 
@@ -109,7 +112,7 @@ public sealed class Session : IDisposable
     {
         var layout = _capture.Layout;
         var sb = new StringBuilder();
-        sb.AppendLine($"Glissando {Program.Version} on {Environment.MachineName}, {Environment.OSVersion}, {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.AppendLine($"Glissando {Program.VersionLong} on {Environment.MachineName}, {Environment.OSVersion}, {DateTime.Now:yyyy-MM-dd HH:mm:ss}; peer build: {(string.IsNullOrEmpty(PeerVersion) ? "unknown" : PeerVersion)}");
         sb.AppendLine($"Bluetooth: {adapterInfo}");
         sb.AppendLine($"Transport: {TransportStatus}; linked={Linked} role={(Linked ? (_channel.IsCentral ? "central" : "peripheral") : "-")} authenticated={Authenticated} peer='{PeerName}' rtt={RttMs:F0} ms");
         sb.AppendLine($"State: controlling={Controlling} controlled={Controlled} locked={Locked} sessionLocked={LocalLocked} peerLocked={PeerLocked} powerSaving={_powerSaving} peerPowerSaving={PeerPowerSaving} idle={Native.IdleMs() / 1000} s");
@@ -232,7 +235,7 @@ public sealed class Session : IDisposable
     {
         RandomNumberGenerator.Fill(_myNonce);
         var layout = _capture.Layout;
-        Enqueue(Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName)));
+        Enqueue(Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version)));
         _lastHello = Stopwatch.GetTimestamp();
     }
 
@@ -290,7 +293,9 @@ public sealed class Session : IDisposable
                     return;
                 }
                 PeerName = hello.Name;
-                Log.Info($"hello from {hello.Name}: capture={hello.CaptureEnabled} ourOriginThere={hello.PeerOrigin} screen={hello.Screen.Width}x{hello.Screen.Height} monitors={hello.Monitors.Length} updated={hello.PlacementUpdated}");
+                PeerVersion = hello.AppVersion;
+                Log.Info($"hello from {hello.Name} [{hello.AppVersion}]: capture={hello.CaptureEnabled} ourOriginThere={hello.PeerOrigin} screen={hello.Screen.Width}x{hello.Screen.Height} monitors={hello.Monitors.Length} updated={hello.PlacementUpdated}");
+                if (hello.AppVersion != Program.Version) Log.Warn($"build mismatch: this PC {Program.Version}, {hello.Name} {hello.AppVersion}");
                 AdoptPeerInfo(hello);
                 Enqueue(Frame.HelloAck(hello.Nonce));
                 if (!Authenticated && Stopwatch.GetTimestamp() - _lastHello > Stopwatch.Frequency) SendHello();
@@ -527,14 +532,18 @@ public sealed class Session : IDisposable
             if (!Linked) return $"Looking for the other PC ({TransportStatus})";
             if (!Authenticated) return TransportStatus.StartsWith("other PC runs") ? TransportStatus : "Linked, authenticating (do both passphrases match?)";
             string rtt = RttMs > 0 ? $", {RttMs:F0} ms" : "";
-            if (Controlling) return $"Controlling {PeerName}{rtt}";
-            if (Controlled) return $"{PeerName} is controlling this PC{rtt}";
+            // Show the peer's build next to its name; flag it when it differs from ours.
+            string peer = string.IsNullOrEmpty(PeerVersion) ? PeerName
+                : PeerVersion == Program.Version ? $"{PeerName} [{PeerVersion}]"
+                : $"{PeerName} [{PeerVersion}, this PC {Program.Version}]";
+            if (Controlling) return $"Controlling {peer}{rtt}";
+            if (Controlled) return $"{peer} is controlling this PC{rtt}";
             if (LocalLocked) return $"This session is locked{rtt}";
-            if (PeerLocked) return $"{PeerName} is locked; unlock it with its own keyboard{rtt}";
+            if (PeerLocked) return $"{peer} is locked; unlock it with its own keyboard{rtt}";
             if (Locked) return $"Cursor locked to this PC (Ctrl+Alt+L unlocks){rtt}";
             return _s.CaptureEnabled
-                ? $"Ready, linked to {PeerName}{rtt}"
-                : $"Ready, linked to {PeerName}{rtt} (this PC does not take control)";
+                ? $"Ready, linked to {peer}{rtt}"
+                : $"Ready, linked to {peer}{rtt} (this PC does not take control)";
         }
     }
 

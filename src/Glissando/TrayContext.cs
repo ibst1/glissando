@@ -63,7 +63,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _lockItem = new ToolStripMenuItem("Lock cursor to this PC") { ShortcutKeyDisplayString = "Ctrl+Alt+L", CheckOnClick = true };
         _lockItem.Click += (_, _) => _session?.SetLocked(_lockItem.Checked);
         var menu = new ContextMenuStrip();
-        menu.Items.Add(new ToolStripMenuItem($"Glissando {Program.Version}") { Enabled = false });
+        menu.Items.Add(new ToolStripMenuItem($"Glissando {Program.VersionLong}") { Enabled = false });
         menu.Items.Add(_status);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_lockItem);

@@ -213,7 +213,7 @@ internal sealed class SettingsForm : Form
         var initial = Glissando.Layout.FromSettings(working);
         _originalOrigin = initial.PeerOrigin;
 
-        Text = (firstRun ? "Glissando setup" : "Glissando settings") + $"  (version {Program.Version})";
+        Text = (firstRun ? "Glissando setup" : "Glissando settings") + $"  ({Program.VersionLong})";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;

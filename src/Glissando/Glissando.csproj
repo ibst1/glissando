@@ -22,4 +22,9 @@
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- build.ps1 passes -p:BuildTime; Program.Version shows it next to the version. -->
+    <AssemblyMetadata Include="BuildTime" Value="$(BuildTime)" Condition="'$(BuildTime)' != ''" />
+  </ItemGroup>
+
 </Project>

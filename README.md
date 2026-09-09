@@ -126,6 +126,12 @@ to `%USERPROFILE%\Program\Glissando` and `dist\`:
 .\build.ps1
 ```
 
+Every build has its own id, `0.3.<commit count>+<hash>` with `.dirty`
+appended when the tree had uncommitted changes, plus the build time. It is
+shown in the tray menu, the dialog title, the exe's file properties, and,
+via the handshake, next to the other PC's name in the tray status, so a
+mismatch is visible at once.
+
 The first start of a freshly built exe takes 10 to 30 seconds while Windows
 Defender scans the new 65 MB file; every start after that takes about a
 second. Nothing is extracted to disk any more.
