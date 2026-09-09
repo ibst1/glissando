@@ -51,6 +51,7 @@ public sealed class Session : IDisposable
     public bool PeerPowerSaving { get; private set; }
 
     private bool _powerSaving;
+    private int _detachPending;
 
     private readonly Settings _s;
     private readonly IChannel _channel;
@@ -74,6 +75,7 @@ public sealed class Session : IDisposable
         _injector = injector;
         _clipboard = clipboard;
         _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !LocalLocked && !PeerLocked && !_injector.Active;
+        _gapTimer = new System.Threading.Timer(_ => { lock (_rxGate) SkipGap(); }, null, Timeout.Infinite, Timeout.Infinite);
     }
 
     /// <summary>Windows locked or unlocked this session.</summary>
@@ -170,8 +172,15 @@ public sealed class Session : IDisposable
         _injector.StateChanged += () => StateChanged?.Invoke();
         _injector.InputWhileInactive += () =>
         {
-            Log.Warn("input arrived while not being controlled; telling the other PC to release");
-            Enqueue(new Frame(FrameType.Detached, []));
+            // Give a late Enter 300 ms to show up before declaring the two sides out of step.
+            if (Interlocked.Exchange(ref _detachPending, 1) == 1) return;
+            _ = Task.Delay(300).ContinueWith(_ =>
+            {
+                Interlocked.Exchange(ref _detachPending, 0);
+                if (_injector.Active || !Authenticated) return;
+                Log.Warn("input keeps arriving while not being controlled; telling the other PC to release");
+                Enqueue(new Frame(FrameType.Detached, []));
+            });
         };
         _injector.ReturnEdgeHit += back =>
         {
@@ -221,6 +230,7 @@ public sealed class Session : IDisposable
             var old = _crypto;
             _crypto = new Crypto(_s.Passphrase, _channel.IsCentral);
             old?.Dispose();
+            ResetOrdering();
             _lastPeer = Stopwatch.GetTimestamp();
             SendHello();
         }
@@ -259,10 +269,69 @@ public sealed class Session : IDisposable
     private readonly object _rxGate = new();
     private long _rejected;
 
+    // Reorder buffer. Sender counters are contiguous, so a gap means a packet is still on its way:
+    // hold the later ones briefly and release everything in counter order. Enter must never apply
+    // after the mouse moves that follow it, or the controlled side answers "Detached" and the pair
+    // bounces in and out of remote mode.
+    private long _nextCounter = -1;
+    private readonly SortedDictionary<long, byte[]> _pending = [];
+    private readonly System.Threading.Timer _gapTimer;
+    private const int GapWaitMs = 40;
+    private const int MaxPending = 32;
+
     private void OnReceived(byte[] packet)
     {
-        // BLE delivers on a thread pool; process one packet at a time so frames apply in order.
-        lock (_rxGate) Dispatch(packet);
+        if (packet.Length < 8) return;
+        long c = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(packet);
+        lock (_rxGate)
+        {
+            if (_nextCounter < 0 || c == _nextCounter)
+            {
+                Dispatch(packet);
+                _nextCounter = c + 1;
+                FlushPending();
+            }
+            else if (c > _nextCounter)
+            {
+                _pending[c] = packet;
+                if (_pending.Count >= MaxPending) SkipGap();
+                else _gapTimer.Change(GapWaitMs, Timeout.Infinite);
+            }
+            else
+            {
+                Dispatch(packet); // late straggler: the crypto window still rejects true duplicates
+            }
+        }
+    }
+
+    private void FlushPending()
+    {
+        while (_pending.Count > 0 && _pending.TryGetValue(_nextCounter, out var next))
+        {
+            _pending.Remove(_nextCounter);
+            Dispatch(next);
+            _nextCounter++;
+        }
+        if (_pending.Count == 0) _gapTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        else _gapTimer.Change(GapWaitMs, Timeout.Infinite);
+    }
+
+    /// <summary>The missing packet is not coming: continue from the oldest one we hold.</summary>
+    private void SkipGap()
+    {
+        if (_pending.Count == 0) return;
+        _nextCounter = _pending.Keys.First();
+        FlushPending();
+    }
+
+    private void ResetOrdering()
+    {
+        lock (_rxGate)
+        {
+            _nextCounter = -1;
+            _pending.Clear();
+            _gapTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        }
     }
 
     /// <summary>Packets that failed decryption or the replay window (diagnostics).</summary>
@@ -554,6 +623,7 @@ public sealed class Session : IDisposable
         _injector.Deactivate();
         _cts.Cancel();
         _queue.Writer.TryComplete();
+        _gapTimer.Dispose();
         _channel.Dispose();
         _crypto?.Dispose();
     }
