@@ -75,7 +75,6 @@ public sealed class Session : IDisposable
         _injector = injector;
         _clipboard = clipboard;
         _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !LocalLocked && !PeerLocked && !_injector.Active;
-        _gapTimer = new System.Threading.Timer(_ => { lock (_rxGate) SkipGap(); }, null, Timeout.Infinite, Timeout.Infinite);
     }
 
     /// <summary>Windows locked or unlocked this session.</summary>
@@ -230,7 +229,6 @@ public sealed class Session : IDisposable
             var old = _crypto;
             _crypto = new Crypto(_s.Passphrase, _channel.IsCentral);
             old?.Dispose();
-            ResetOrdering();
             _lastPeer = Stopwatch.GetTimestamp();
             SendHello();
         }
@@ -269,69 +267,14 @@ public sealed class Session : IDisposable
     private readonly object _rxGate = new();
     private long _rejected;
 
-    // Reorder buffer. Sender counters are contiguous, so a gap means a packet is still on its way:
-    // hold the later ones briefly and release everything in counter order. Enter must never apply
-    // after the mouse moves that follow it, or the controlled side answers "Detached" and the pair
-    // bounces in and out of remote mode.
-    private long _nextCounter = -1;
-    private readonly SortedDictionary<long, byte[]> _pending = [];
-    private readonly System.Threading.Timer _gapTimer;
-    private const int GapWaitMs = 40;
-    private const int MaxPending = 32;
-
     private void OnReceived(byte[] packet)
     {
-        if (packet.Length < 8) return;
-        long c = System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(packet);
-        lock (_rxGate)
-        {
-            if (_nextCounter < 0 || c == _nextCounter)
-            {
-                Dispatch(packet);
-                _nextCounter = c + 1;
-                FlushPending();
-            }
-            else if (c > _nextCounter)
-            {
-                _pending[c] = packet;
-                if (_pending.Count >= MaxPending) SkipGap();
-                else _gapTimer.Change(GapWaitMs, Timeout.Infinite);
-            }
-            else
-            {
-                Dispatch(packet); // late straggler: the crypto window still rejects true duplicates
-            }
-        }
-    }
-
-    private void FlushPending()
-    {
-        while (_pending.Count > 0 && _pending.TryGetValue(_nextCounter, out var next))
-        {
-            _pending.Remove(_nextCounter);
-            Dispatch(next);
-            _nextCounter++;
-        }
-        if (_pending.Count == 0) _gapTimer.Change(Timeout.Infinite, Timeout.Infinite);
-        else _gapTimer.Change(GapWaitMs, Timeout.Infinite);
-    }
-
-    /// <summary>The missing packet is not coming: continue from the oldest one we hold.</summary>
-    private void SkipGap()
-    {
-        if (_pending.Count == 0) return;
-        _nextCounter = _pending.Keys.First();
-        FlushPending();
-    }
-
-    private void ResetOrdering()
-    {
-        lock (_rxGate)
-        {
-            _nextCounter = -1;
-            _pending.Clear();
-            _gapTimer.Change(Timeout.Infinite, Timeout.Infinite);
-        }
+        // Apply frames one at a time, in arrival order. BLE may deliver a little out of order: the crypto
+        // sliding window accepts that without calling it a replay, a reordered mouse delta is invisible,
+        // and the one ordering that matters -- an Enter arriving after the moves it precedes -- is handled
+        // by the 300 ms delay before Detached. An earlier reorder buffer here stalled the mouse whenever a
+        // packet was actually lost (not just reordered), which BLE does often, and made motion jumpy.
+        lock (_rxGate) Dispatch(packet);
     }
 
     /// <summary>Packets that failed decryption or the replay window (diagnostics).</summary>
@@ -623,7 +566,6 @@ public sealed class Session : IDisposable
         _injector.Deactivate();
         _cts.Cancel();
         _queue.Writer.TryComplete();
-        _gapTimer.Dispose();
         _channel.Dispose();
         _crypto?.Dispose();
     }
