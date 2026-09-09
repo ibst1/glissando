@@ -42,6 +42,20 @@ internal static class CursorHider
         }
     }
 
+    /// <summary>
+    /// Reload the user's cursor scheme unconditionally. Called at startup so that if a previous instance
+    /// was killed (Task Manager, a crash, a force-kill) while the cursors were hidden and left the whole
+    /// system with blank cursors, launching Glissando again puts them back.
+    /// </summary>
+    public static void RestoreSchemeAtStartup()
+    {
+        lock (Gate)
+        {
+            SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+            _hidden = false;
+        }
+    }
+
     private static IntPtr CreateBlankCursor()
     {
         const int size = 32;

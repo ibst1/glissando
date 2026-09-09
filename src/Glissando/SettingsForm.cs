@@ -200,7 +200,7 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _capture = new() { Text = "This PC's mouse and keyboard may control the other PC", AutoSize = true };
     private readonly CheckBox _clip = new() { Text = "Copy clipboard text across when the cursor crosses", AutoSize = true };
     private readonly CheckBox _autostart = new() { Text = "Start Glissando with Windows", AutoSize = true };
-    private readonly CheckBox _hideCursor = new() { Text = "Hide this PC's cursor while controlling the other PC (swaps the system cursors; restored on return)", AutoSize = true, MaximumSize = new Size(480, 0) };
+    private readonly CheckBox _hideCursor = new() { Text = "Hide this PC's cursor while controlling the other PC (swaps the system cursors; restored on return, and on next start if Glissando is ever killed while they are hidden)", AutoSize = true, MaximumSize = new Size(480, 0) };
     private readonly CheckBox _powerSave = new() { Text = "Save power after 5 minutes without input (the first move after a pause is then slower)", AutoSize = true, MaximumSize = new Size(480, 0) };
     private readonly ComboBox _ble = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
     private readonly Label _btInfo = new() { AutoSize = true, MaximumSize = new Size(470, 0) };

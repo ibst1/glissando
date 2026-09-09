@@ -80,6 +80,9 @@ internal static class Program
         }
 
         var settings = Settings.Load(settingsPath);
+        // If a previous instance was killed while the cursor was hidden, the whole system is left with
+        // blank cursors. Put them back now, before anything else, so the user is never stuck unable to click.
+        if (settings.HideCursorWhileControlling) Host.CursorHider.RestoreSchemeAtStartup();
         if (overrides.TryGetValue("ble", out var b) && Enum.TryParse<BleMode>(b, true, out var ble)) settings.Ble = ble;
 
         if (setup || string.IsNullOrWhiteSpace(settings.Passphrase))
