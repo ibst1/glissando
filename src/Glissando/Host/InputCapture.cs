@@ -160,12 +160,10 @@ public sealed class InputCapture : IDisposable
             return 1;
         }
 
-        bool repeat = false;
-        if (up) _keysDown.Remove(key);
-        else repeat = !_keysDown.Add(key); // HashSet.Add returns false when the key was already held
-        // A held modifier auto-repeats its down event ~30x/s; forwarding that floods the link for no gain,
-        // since the modifier is already down on the other PC. Other keys must repeat so holding them repeats.
-        if (repeat && Native.IsModifierVk(info.vkCode)) return 1;
+        if (up) _keysDown.Remove(key); else _keysDown.Add(key);
+        // Forward auto-repeat too. For a held key it re-asserts the down ~30x/s, which is what keeps a held
+        // modifier (Shift while arrowing, Ctrl while typing) alive across a dropped packet on the lossy link,
+        // and for an ordinary key it produces hold-to-repeat on the other PC.
         if (KeyLog) Log.Info($"fwd key vk=0x{info.vkCode:X2} {(up ? "up  " : "down")} ext={ext} scan=0x{info.scanCode:X2}");
         Output?.Invoke(Frame.Key(key.Item1, key.Item2, up, ext));
         return 1;
