@@ -70,8 +70,12 @@ public sealed class InputInjector
         }
     }
 
+    /// <summary>Refresh the "peer is still controlling us" clock (Enter and each ControlAlive heartbeat).</summary>
+    public void KeepAlive() => LastInputTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+
     private void Enter(Crossing c)
     {
+        LastInputTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         _screen = Layout.MyVirtualScreen();
         // Land a few pixels inside the edge; crossing back needs a real push toward it, not jitter.
         var p = Layout.ClampIntoMonitor(c.Target, Layout.Add(c.Target, Layout.Unit(c.Dir), 6));

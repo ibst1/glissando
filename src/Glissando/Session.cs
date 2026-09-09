@@ -362,6 +362,10 @@ public sealed class Session : IDisposable
                 }
                 break;
 
+            case FrameType.ControlAlive:
+                if (Authenticated && _injector.Active) _injector.KeepAlive();
+                break;
+
             case FrameType.Status:
                 if (f.Payload.Length >= 1)
                 {
@@ -500,6 +504,19 @@ public sealed class Session : IDisposable
                     Log.Warn($"no frames from peer for {sincePeer:F0} ms");
                     SetAuthenticated(false);
                 }
+
+                // While controlling, tell the other PC so it stays active even when the mouse is still.
+                if (_capture.Remote) Enqueue(new Frame(FrameType.ControlAlive, []));
+
+                // If we are being controlled but the controller has gone silent (a lost Leave, or it
+                // crashed), release: no input or heartbeat for 1.2 s. The heartbeat above is 4x/s, so a
+                // real pause with the controller present does not trip this.
+                if (_injector.Active && now - _injector.LastInputTicks > Stopwatch.Frequency * 1200 / 1000)
+                {
+                    Log.Warn("controller went silent; releasing control locally");
+                    _injector.Deactivate();
+                }
+
                 if (!Authenticated && sinceHello > 2000) SendHello();
                 else if (sinceSend > keepalive) Enqueue(Frame.Ping(now));
             }
