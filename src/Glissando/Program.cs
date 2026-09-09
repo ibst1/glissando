@@ -33,6 +33,7 @@ internal static class Program
             {
                 case "--console": console = true; break;
                 case "--setup": setup = true; break;
+                case "--keylog": Host.InputCapture.KeyLog = true; break;
                 case "--cursor-test":
                     // Hidden: blank the system cursors for two seconds and restore them, to check the mechanism.
                     Host.CursorHider.Hide();

@@ -123,6 +123,7 @@ public sealed class InputInjector
     {
         var key = (vk, scan, ext);
         if (up) _keysDown.Remove(key); else _keysDown.Add(key);
+        if (Host.InputCapture.KeyLog) Log.Info($"apply key vk=0x{vk:X2} {(up ? "up  " : "down")} ext={ext} scan=0x{scan:X2}");
         SendKey(vk, scan, up, ext);
     }
 

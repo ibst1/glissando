@@ -166,9 +166,13 @@ public sealed class InputCapture : IDisposable
         // A held modifier auto-repeats its down event ~30x/s; forwarding that floods the link for no gain,
         // since the modifier is already down on the other PC. Other keys must repeat so holding them repeats.
         if (repeat && Native.IsModifierVk(info.vkCode)) return 1;
+        if (KeyLog) Log.Info($"fwd key vk=0x{info.vkCode:X2} {(up ? "up  " : "down")} ext={ext} scan=0x{info.scanCode:X2}");
         Output?.Invoke(Frame.Key(key.Item1, key.Item2, up, ext));
         return 1;
     }
+
+    /// <summary>Log every key forwarded and applied, to diagnose lost keystrokes. On by default for now.</summary>
+    public static bool KeyLog = true;
 
     private bool CtrlDown() => _keysDown.Any(k => k.vk is Native.VK_LCONTROL or Native.VK_RCONTROL);
     private bool AltDown() => _keysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU);
