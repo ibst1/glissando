@@ -205,16 +205,28 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         catch (Exception ex) { Log.Warn("open: " + ex.Message); }
     }
 
+    private bool _exiting;
+
     private void Exit()
     {
+        if (_exiting) return;
+        _exiting = true;
         Log.Info("exiting");
-        Microsoft.Win32.SystemEvents.PowerModeChanged -= _powerHandler;
-        Microsoft.Win32.SystemEvents.SessionSwitch -= _sessionHandler;
-        _session.Dispose();
-        _capture.Dispose();
-        _tray.Visible = false;
-        _tray.Dispose();
+        try
+        {
+            Microsoft.Win32.SystemEvents.PowerModeChanged -= _powerHandler;
+            Microsoft.Win32.SystemEvents.SessionSwitch -= _sessionHandler;
+            _session.Dispose();
+            _capture.Dispose();
+            Host.CursorHider.Restore();
+            _tray.Visible = false;
+            _tray.Dispose();
+        }
+        catch (Exception ex) { Log.Warn("exit cleanup: " + ex.Message); }
         ExitThread();
+        // Guarantee the process actually terminates and releases the exe, even if some background or
+        // WinRT thread would otherwise keep it alive (which once left it running with no tray icon).
+        Environment.Exit(0);
     }
 
     // ---- IClipboardAccess (marshalled to the STA thread) ----

@@ -18,6 +18,10 @@ public sealed class InputInjector
     /// <summary>Both PCs' monitors and where the other PC sits. Replaced whole when settings or screens change.</summary>
     public Layout Layout { get; set; }
 
+    /// <summary>Stopwatch timestamp of the last input frame from the peer. Lets the host know the peer is
+    /// still feeding us injected moves, so it should not treat that injected cursor as its own.</summary>
+    public long LastInputTicks;
+
     private Rectangle _screen;
     // The return crossing is disarmed until the cursor has moved this far in from every edge that leads
     // back. Without this the cursor, which lands a few px inside on Enter, bounces home on the first jitter.
@@ -39,6 +43,8 @@ public sealed class InputInjector
     {
         lock (_gate)
         {
+            if (f.Type is FrameType.MouseMove or FrameType.MouseButton or FrameType.MouseWheel or FrameType.Key)
+                LastInputTicks = System.Diagnostics.Stopwatch.GetTimestamp();
             if (!Active && f.Type is FrameType.MouseMove or FrameType.MouseButton or FrameType.MouseWheel or FrameType.Key)
             {
                 // Only Enter starts a session; anything else means the two sides disagree. Say so (rate limited) and ignore.

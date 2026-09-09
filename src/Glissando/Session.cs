@@ -74,7 +74,18 @@ public sealed class Session : IDisposable
         _capture = capture;
         _injector = injector;
         _clipboard = clipboard;
-        _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !LocalLocked && !PeerLocked && !_injector.Active;
+        // Do not start controlling while the peer is still feeding us injected moves: right after it hands
+        // control back, its trailing moves land on our return edge, and reading that injected cursor as our
+        // own would start a crossing war. This clears within ~150 ms of the peer's last frame, so a real
+        // handover (the peer has actually stopped) stays responsive.
+        _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !LocalLocked && !PeerLocked
+            && !_injector.Active && !PeerRecentlyInjected();
+    }
+
+    private bool PeerRecentlyInjected()
+    {
+        long t = _injector.LastInputTicks;
+        return t != 0 && Stopwatch.GetTimestamp() - t < Stopwatch.Frequency * 150 / 1000;
     }
 
     /// <summary>Windows locked or unlocked this session.</summary>
@@ -168,13 +179,7 @@ public sealed class Session : IDisposable
         _capture.LockToggleRequested += () => SetLocked(!Locked);
         _capture.JumpRequested += Jump;
 
-        _injector.StateChanged += () =>
-        {
-            // Just stopped being controlled: hold off our own edge detection while the peer's last
-            // injected moves drain, or the injected cursor on our return edge starts a crossing war.
-            if (!_injector.Active) _capture.SuppressEdge(400);
-            StateChanged?.Invoke();
-        };
+        _injector.StateChanged += () => StateChanged?.Invoke();
         _injector.InputWhileInactive += () =>
         {
             // Give a late Enter 300 ms to show up before declaring the two sides out of step.
