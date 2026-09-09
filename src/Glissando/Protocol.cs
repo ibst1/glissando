@@ -192,7 +192,9 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
 /// <summary>
 /// AES-GCM framing. Packet = counter(8, big-endian) || ciphertext || tag(16).
 /// Nonce = direction(1) || 0(3) || counter(8). Counters start from the wall clock so they
-/// stay unique across restarts, and the receiver only accepts strictly increasing counters.
+/// stay unique across restarts. The receiver keeps a sliding window of the last 64 counters:
+/// packets may arrive slightly out of order (BLE callbacks run concurrently) but never twice,
+/// and anything older than the window is dropped.
 /// The direction byte is 1 for frames sent by the BLE central and 2 for the peripheral.
 /// </summary>
 public sealed class Crypto : IDisposable
@@ -201,7 +203,9 @@ public sealed class Crypto : IDisposable
     private readonly AesGcm _aes;
     private readonly byte _dirSend, _dirRecv;
     private long _sendCounter;
-    private long _lastRecv = -1;
+    private long _highest = -1;   // highest counter accepted so far
+    private ulong _window;        // bit i set = counter (_highest - i) has been accepted
+    private const int WindowSize = 64;
     private readonly object _gate = new();
 
     public const int Overhead = 8 + 16;
@@ -239,13 +243,26 @@ public sealed class Crypto : IDisposable
         var body = new byte[packet.Length - Overhead];
         lock (_gate)
         {
-            if (counter <= _lastRecv) return false;
+            long behind = _highest - counter; // negative = newer than anything seen
+            if (_highest >= 0 && behind >= WindowSize) return false;                       // too old
+            if (_highest >= 0 && behind >= 0 && ((_window >> (int)behind) & 1) != 0) return false; // replay
             try
             {
                 _aes.Decrypt(nonce, packet.Slice(8, body.Length), packet[^16..], body);
             }
             catch (CryptographicException) { return false; }
-            _lastRecv = counter;
+
+            if (_highest < 0 || behind < 0)
+            {
+                long shift = _highest < 0 ? WindowSize : -behind;
+                _window = shift >= WindowSize ? 0 : _window << (int)shift;
+                _window |= 1;
+                _highest = counter;
+            }
+            else
+            {
+                _window |= 1UL << (int)behind;
+            }
         }
         plain = body;
         return true;

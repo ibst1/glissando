@@ -189,8 +189,8 @@ public sealed class InputCapture : IDisposable
         if (got == uint.MaxValue || got < Native.RawHeaderSize + 20) return;
         uint type = BinaryPrimitives.ReadUInt32LittleEndian(_rawBuf);
         if (type != Native.RIM_TYPEMOUSE) return;
-        long hDevice = BinaryPrimitives.ReadInt64LittleEndian(_rawBuf.AsSpan(8));
-        if (hDevice == 0) return; // injected by SendInput (e.g. the other PC controlling us): never echo it back
+        // Note: no filtering on hDevice. Some mice and touchpads report no device handle, and the loop this
+        // once guarded against cannot happen: while we are remote the other PC is never injecting into us.
         int m = Native.RawHeaderSize;
         ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m));
         if ((flags & Native.MOUSE_MOVE_ABSOLUTE) != 0) return; // tablets/RDP: not supported yet
@@ -198,8 +198,12 @@ public sealed class InputCapture : IDisposable
         int dy = BinaryPrimitives.ReadInt32LittleEndian(_rawBuf.AsSpan(m + 16));
         if (dx == 0 && dy == 0) return;
         if (!Remote) { _rawDx = dx; _rawDy = dy; return; }
+        Interlocked.Increment(ref MovesForwarded);
         Output?.Invoke(Frame.MouseMove(dx, dy));
     }
+
+    /// <summary>Mouse-move frames produced while remote (diagnostics).</summary>
+    public long MovesForwarded;
 
     // ---- crossing ---------------------------------------------------------------
 

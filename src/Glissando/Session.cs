@@ -113,6 +113,7 @@ public sealed class Session : IDisposable
         sb.AppendLine($"Bluetooth: {adapterInfo}");
         sb.AppendLine($"Transport: {TransportStatus}; linked={Linked} role={(Linked ? (_channel.IsCentral ? "central" : "peripheral") : "-")} authenticated={Authenticated} peer='{PeerName}' rtt={RttMs:F0} ms");
         sb.AppendLine($"State: controlling={Controlling} controlled={Controlled} locked={Locked} sessionLocked={LocalLocked} peerLocked={PeerLocked} powerSaving={_powerSaving} peerPowerSaving={PeerPowerSaving} idle={Native.IdleMs() / 1000} s");
+        sb.AppendLine($"Counters: movesForwarded={Interlocked.Read(ref _capture.MovesForwarded)} rejectedPackets={Rejected} queued={Volatile.Read(ref _queued)}");
         sb.AppendLine($"Settings: ble={_s.Ble} capture={_s.CaptureEnabled} clipboard={_s.SyncClipboard} hideCursor={_s.HideCursorWhileControlling} powerSave={_s.PowerSaveWhenIdle} keepalive={_s.KeepaliveMs} timeout={_s.PeerTimeoutMs} passphrase={(string.IsNullOrEmpty(_s.Passphrase) ? "(empty)" : $"set, {_s.Passphrase.Length} chars")} placementUpdated={_s.PlacementUpdated}");
         sb.AppendLine($"Layout: peerOrigin={layout.PeerOrigin} virtualScreen={Layout.MyVirtualScreen()}");
         foreach (var m in layout.Mine) sb.AppendLine($"  mine #{m.Number}: {m.Bounds}");
@@ -252,13 +253,26 @@ public sealed class Session : IDisposable
         StateChanged?.Invoke();
     }
 
+    private readonly object _rxGate = new();
+    private long _rejected;
+
     private void OnReceived(byte[] packet)
+    {
+        // BLE delivers on a thread pool; process one packet at a time so frames apply in order.
+        lock (_rxGate) Dispatch(packet);
+    }
+
+    /// <summary>Packets that failed decryption or the replay window (diagnostics).</summary>
+    public long Rejected => Interlocked.Read(ref _rejected);
+
+    private void Dispatch(byte[] packet)
     {
         var crypto = _crypto;
         if (crypto == null) return;
         if (!crypto.Open(packet, out var plain))
         {
-            Log.Warn($"rejected packet ({packet.Length} bytes): bad passphrase, replay or corruption");
+            long n = Interlocked.Increment(ref _rejected);
+            if (n <= 5 || n % 100 == 0) Log.Warn($"rejected packet #{n} ({packet.Length} bytes): bad passphrase, replay or corruption");
             return;
         }
         if (!Frame.TryDecode(plain, out var f)) return;

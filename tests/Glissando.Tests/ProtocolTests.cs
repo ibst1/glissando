@@ -83,6 +83,25 @@ public class ProtocolTests
     }
 
     [Fact]
+    public void Crypto_AcceptsSlightReorderingButNeverDuplicates()
+    {
+        using var a = new Crypto("k", true);
+        using var b = new Crypto("k", false);
+        var p1 = a.Seal([1]); var p2 = a.Seal([2]); var p3 = a.Seal([3]);
+        Assert.True(b.Open(p3, out _));   // newest first
+        Assert.True(b.Open(p1, out _));   // older ones still accepted
+        Assert.True(b.Open(p2, out _));
+        Assert.False(b.Open(p2, out _));  // but only once each
+        Assert.False(b.Open(p1, out _));
+        Assert.False(b.Open(p3, out _));
+
+        // Anything more than 64 behind the newest is dropped.
+        var old = a.Seal([4]);
+        for (int i = 0; i < 70; i++) Assert.True(b.Open(a.Seal([9]), out _));
+        Assert.False(b.Open(old, out _));
+    }
+
+    [Fact]
     public void Crypto_CountersAreIncreasingAcrossPackets()
     {
         using var a = new Crypto("k", true);
