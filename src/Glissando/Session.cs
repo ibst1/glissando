@@ -164,6 +164,11 @@ public sealed class Session : IDisposable
         _capture.JumpRequested += Jump;
 
         _injector.StateChanged += () => StateChanged?.Invoke();
+        _injector.InputWhileInactive += () =>
+        {
+            Log.Warn("input arrived while not being controlled; telling the other PC to release");
+            Enqueue(new Frame(FrameType.Detached, []));
+        };
         _injector.ReturnEdgeHit += back =>
         {
             Enqueue(Frame.ReturnEdge(back));
@@ -232,13 +237,15 @@ public sealed class Session : IDisposable
 
     private void SetAuthenticated(bool v)
     {
+        bool changed = Authenticated != v;
+        // Flip the flag first so the mouse hook cannot re-enter remote mode while we are releasing it.
+        Authenticated = v;
         if (!v)
         {
             _capture.Release();
             _injector.Deactivate();
         }
-        if (Authenticated == v) return;
-        Authenticated = v;
+        if (!changed) return;
         Log.Info(v ? $"peer authenticated: {PeerName}" : "peer lost");
         if (v) SendStatus();
         else { PeerLocked = false; PeerPowerSaving = false; }
@@ -305,6 +312,14 @@ public sealed class Session : IDisposable
                 if (Authenticated) ReceiveClipboard(f);
                 break;
 
+            case FrameType.Detached:
+                if (_capture.Remote)
+                {
+                    Log.Warn($"{PeerName} says it is not being controlled; releasing");
+                    _capture.Release();
+                }
+                break;
+
             case FrameType.Status:
                 if (f.Payload.Length >= 1)
                 {
@@ -347,13 +362,20 @@ public sealed class Session : IDisposable
             _s.OtherScreen = hello.Screen;
             changed = true;
         }
-        if (hello.PlacementUpdated > _s.PlacementUpdated)
+        // The peer tells us where OUR origin sits in ITS pixels; ours is the mirror image.
+        var theirView = new Point(-hello.PeerOrigin.X, -hello.PeerOrigin.Y);
+        var myView = _capture.Layout.PeerOrigin;
+        bool newer = hello.PlacementUpdated > _s.PlacementUpdated;
+        // Nobody has saved a placement yet and the two defaults disagree (both say "the other PC is to my
+        // right"): let the PC with the greater name adopt the other's view, so the pair is at least consistent
+        // and the cursor can come back. Saving in the settings dialog on either PC replaces this.
+        bool tieBreak = !newer && hello.PlacementUpdated == _s.PlacementUpdated && theirView != myView
+            && string.CompareOrdinal(Environment.MachineName, hello.Name) > 0;
+        if (newer || tieBreak)
         {
-            // The peer tells us where OUR origin sits in ITS pixels; ours is the mirror image.
-            var mine = new Point(-hello.PeerOrigin.X, -hello.PeerOrigin.Y);
-            Log.Info($"adopting placement from {hello.Name}: peer origin at {mine}");
-            _s.PeerX = mine.X;
-            _s.PeerY = mine.Y;
+            Log.Info($"adopting placement from {hello.Name}{(tieBreak ? " (tie-break)" : "")}: peer origin at {theirView}");
+            _s.PeerX = theirView.X;
+            _s.PeerY = theirView.Y;
             _s.PlacementUpdated = hello.PlacementUpdated;
             changed = true;
         }

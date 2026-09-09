@@ -7,6 +7,11 @@ public sealed class InputInjector
     public event Action<Crossing>? ReturnEdgeHit;
     public event Action? StateChanged;
 
+    /// <summary>Raised when mouse or key input arrives while not active: the controller still thinks it drives us.</summary>
+    public event Action? InputWhileInactive;
+
+    private long _lastDetachedTicks;
+
     /// <summary>True between Enter and Leave/return.</summary>
     public volatile bool Active;
 
@@ -30,6 +35,17 @@ public sealed class InputInjector
     {
         lock (_gate)
         {
+            if (!Active && f.Type is FrameType.MouseMove or FrameType.MouseButton or FrameType.MouseWheel or FrameType.Key)
+            {
+                // Only Enter starts a session; anything else means the two sides disagree. Say so (rate limited) and ignore.
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (now - _lastDetachedTicks > System.Diagnostics.Stopwatch.Frequency / 2)
+                {
+                    _lastDetachedTicks = now;
+                    InputWhileInactive?.Invoke();
+                }
+                return;
+            }
             switch (f.Type)
             {
                 case FrameType.Enter: if (f.ReadCrossing() is Crossing c) Enter(c); break;

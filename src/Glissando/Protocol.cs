@@ -18,7 +18,8 @@ public enum FrameType : byte
     ReturnEdge = 10, // x(i32) y(i32) dir(1): the controlled PC's cursor left toward the controller; target in the controller's pixels
     Clipboard = 11,  // id(1) index(1) total(1) utf8 chunk
     Pong = 12,       // echo of a Ping's payload (sender's timestamp), for round-trip measurement
-    Status = 13,     // flags(1): bit0 = this PC's session is locked
+    Status = 13,     // flags(1): bit0 = this PC's session is locked, bit1 = power saving
+    Detached = 14,   // controlled PC got input while not active: the controller should release
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)

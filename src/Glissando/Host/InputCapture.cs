@@ -41,6 +41,10 @@ public sealed class InputCapture : IDisposable
     private readonly HashSet<byte> _buttonsDown = [];
     private readonly byte[] _rawBuf = new byte[128];
 
+    // Enter/leave may be called from the hook (UI thread), the receive thread and the timer thread.
+    // Without this the hook could re-enter remote mode in the middle of a leave and win the race.
+    private readonly object _modeGate = new();
+
     public InputCapture(Layout layout, IntPtr rawInputWindow)
     {
         Layout = layout;
@@ -67,16 +71,10 @@ public sealed class InputCapture : IDisposable
     public void ScreenChanged() => _screen = Layout.MyVirtualScreen();
 
     /// <summary>Stop forwarding and hand control back locally (peer lost, user escape, exit).</summary>
-    public void Release()
-    {
-        if (Remote) LeaveRemote(null);
-    }
+    public void Release() => LeaveRemote(null);
 
     /// <summary>The other PC reports its cursor crossed back toward us.</summary>
-    public void OnReturnEdge(Crossing c)
-    {
-        if (Remote) LeaveRemote(c);
-    }
+    public void OnReturnEdge(Crossing c) => LeaveRemote(c);
 
     private Point ToLocal(Native.POINT p) => new(p.X - _screen.X, p.Y - _screen.Y);
     private Point ToScreen(Point p) => new(p.X + _screen.X, p.Y + _screen.Y);
@@ -214,17 +212,34 @@ public sealed class InputCapture : IDisposable
 
     private void EnterRemote(Crossing c)
     {
-        Remote = true;
-        _keysDown.Clear();
-        _buttonsDown.Clear();
-        Log.Info($"entering remote: {c.Dir} -> peer {c.Target}");
-        Output?.Invoke(Frame.Enter(c));
+        lock (_modeGate)
+        {
+            if (Remote || Stopwatch.GetTimestamp() < _ignoreEdgeUntil) return;
+            Remote = true;
+            _keysDown.Clear();
+            _buttonsDown.Clear();
+            Log.Info($"entering remote: {c.Dir} -> peer {c.Target}");
+            Output?.Invoke(Frame.Enter(c));
+        }
         EnteredRemote?.Invoke();
     }
 
     private void LeaveRemote(Crossing? back)
     {
-        Remote = false;
+        lock (_modeGate)
+        {
+            if (!Remote) return;
+            // Close the door before anything else: a cursor still parked on the edge must not re-enter.
+            _ignoreEdgeUntil = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 4;
+            Remote = false;
+            LeaveRemoteCore(back);
+        }
+        Log.Info("left remote");
+        LeftRemote?.Invoke();
+    }
+
+    private void LeaveRemoteCore(Crossing? back)
+    {
         foreach (var k in _keysDown.ToArray()) Output?.Invoke(Frame.Key(k.vk, k.scan, true, k.ext));
         foreach (var b in _buttonsDown.ToArray()) Output?.Invoke(Frame.MouseButton(b, false));
         _keysDown.Clear();
@@ -248,13 +263,11 @@ public sealed class InputCapture : IDisposable
         var s = ToScreen(target);
         Native.SetCursorPos(s.X, s.Y);
         _ignoreEdgeUntil = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 4;
-        Log.Info("left remote");
-        LeftRemote?.Invoke();
     }
 
     public void Dispose()
     {
-        if (Remote) LeaveRemote(null);
+        LeaveRemote(null);
         if (_mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_mouseHook);
         if (_keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_keyHook);
         _mouseHook = _keyHook = IntPtr.Zero;
