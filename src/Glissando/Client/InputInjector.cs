@@ -63,7 +63,8 @@ public sealed class InputInjector
     private void Enter(Crossing c)
     {
         _screen = Layout.MyVirtualScreen();
-        var p = Layout.ClampIntoMonitor(c.Target, Layout.Add(c.Target, Layout.Unit(c.Dir), 2));
+        // Land a few pixels inside the edge; crossing back needs a real push toward it, not jitter.
+        var p = Layout.ClampIntoMonitor(c.Target, Layout.Add(c.Target, Layout.Unit(c.Dir), 6));
         Native.SetCursorPos(p.X + _screen.X, p.Y + _screen.Y);
         SetActive(true);
     }

@@ -54,6 +54,16 @@ public class LayoutTests
     }
 
     [Fact]
+    public void OnTheEdge_ButNotPushingIntoIt_IsNotACrossing()
+    {
+        var edge = new Point(2560, 500); // left edge of monitor 4, peer beyond
+        Assert.Null(Notch().FindCrossing(edge, 0, 5));    // sliding along the edge
+        Assert.Null(Notch().FindCrossing(edge, 3, 0));    // moving away from it
+        Assert.NotNull(Notch().FindCrossing(edge, -1, 4)); // mostly along, but still pushing in
+        Assert.NotNull(Notch().FindCrossing(edge, 0, 0));  // no movement info: counts
+    }
+
+    [Fact]
     public void Corner_PrefersTheDominantMovementDirection()
     {
         // One monitor of mine; the peer has two monitors, one to my right and one directly above me,

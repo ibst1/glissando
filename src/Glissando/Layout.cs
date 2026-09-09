@@ -53,14 +53,22 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
 
     /// <summary>
     /// The cursor is at <paramref name="p"/> (my coordinates) and the last movement was (dx, dy).
-    /// Returns where it crosses to the other PC, or null if it is not on such an edge.
-    /// Windows clamps the cursor to the monitors, so being on the edge is enough; the delta only
-    /// disambiguates corners where two directions both lead across.
+    /// Returns where it crosses to the other PC, or null if it is not on such an edge, or if the
+    /// movement does not push into that edge (sliding along it, or jitter away from it, must not
+    /// cross). With no movement information (0, 0) any edge the cursor sits on counts.
     /// </summary>
     public Crossing? FindCrossing(Point p, int dx, int dy)
     {
         var peer = PeerInMine();
         var candidates = new List<Crossing>(2);
+        bool hasDelta = dx != 0 || dy != 0;
+        static bool Toward(Dir d, int dx, int dy) => d switch
+        {
+            Dir.Left => dx < 0,
+            Dir.Right => dx > 0,
+            Dir.Up => dy < 0,
+            _ => dy > 0,
+        };
         foreach (var m in Mine)
         {
             var r = m.Bounds;
@@ -75,6 +83,7 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
                     _ => p.Y == r.Bottom - 1,
                 };
                 if (!onEdge) continue;
+                if (hasDelta && !Toward(d, dx, dy)) continue;
                 var q = Add(p, Unit(d));
                 if (Mine.Any(o => Contains(o.Bounds, q))) continue;   // a seam to another of my monitors
                 if (!peer.Any(o => Contains(o.Bounds, q))) continue;  // empty desktop, not the peer
@@ -82,16 +91,14 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
             }
         }
         if (candidates.Count == 0) return null;
-        if (candidates.Count == 1 || (dx == 0 && dy == 0)) return candidates[0];
+        if (candidates.Count == 1 || !hasDelta) return candidates[0];
 
-        Dir? wantX = dx < 0 ? Dir.Left : dx > 0 ? Dir.Right : null;
-        Dir? wantY = dy < 0 ? Dir.Up : dy > 0 ? Dir.Down : null;
-        Dir? primary = Math.Abs(dx) >= Math.Abs(dy) ? wantX ?? wantY : wantY ?? wantX;
-        Dir? secondary = primary == wantX ? wantY : wantX;
-        foreach (var want in new[] { primary, secondary })
-            if (want != null)
-                foreach (var c in candidates)
-                    if (c.Dir == want) return c;
+        // Corner with two ways across: take the axis the mouse moves most along.
+        Dir primary = Math.Abs(dx) >= Math.Abs(dy)
+            ? (dx < 0 ? Dir.Left : Dir.Right)
+            : (dy < 0 ? Dir.Up : Dir.Down);
+        foreach (var c in candidates)
+            if (c.Dir == primary) return c;
         return candidates[0];
     }
 
