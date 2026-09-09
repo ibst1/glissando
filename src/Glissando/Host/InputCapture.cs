@@ -69,6 +69,14 @@ public sealed class InputCapture : IDisposable
 
     public void ScreenChanged() => _screen = Layout.MyVirtualScreen();
 
+    /// <summary>
+    /// Ignore edge crossings for a while. Used right after this PC stops being controlled: the other PC's
+    /// last injected mouse moves are still arriving, and without this the injected cursor sitting on our
+    /// return edge would be read as our own mouse and we would cross straight back, so the two PCs fight.
+    /// </summary>
+    public void SuppressEdge(int milliseconds)
+        => _ignoreEdgeUntil = Stopwatch.GetTimestamp() + Stopwatch.Frequency * milliseconds / 1000;
+
     /// <summary>Stop forwarding and hand control back locally (peer lost, user escape, exit).</summary>
     public void Release() => LeaveRemote(null);
 

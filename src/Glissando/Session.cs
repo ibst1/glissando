@@ -168,7 +168,13 @@ public sealed class Session : IDisposable
         _capture.LockToggleRequested += () => SetLocked(!Locked);
         _capture.JumpRequested += Jump;
 
-        _injector.StateChanged += () => StateChanged?.Invoke();
+        _injector.StateChanged += () =>
+        {
+            // Just stopped being controlled: hold off our own edge detection while the peer's last
+            // injected moves drain, or the injected cursor on our return edge starts a crossing war.
+            if (!_injector.Active) _capture.SuppressEdge(400);
+            StateChanged?.Invoke();
+        };
         _injector.InputWhileInactive += () =>
         {
             // Give a late Enter 300 ms to show up before declaring the two sides out of step.
