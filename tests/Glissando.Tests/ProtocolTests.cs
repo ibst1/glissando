@@ -58,6 +58,26 @@ public class ProtocolTests
     }
 
     [Fact]
+    public void Reliable_WrapsAndUnwrapsAnInnerFrame()
+    {
+        var inner = Frame.Key(0x43, 0x2E, up: false, extended: false);
+        var wrapped = Frame.Reliable(4242, inner.Encode());
+        Assert.True(Frame.TryDecode(wrapped.Encode(), out var w));
+        Assert.Equal(FrameType.Reliable, w.Type);
+        Assert.Equal(4242u, w.U32(0));
+        Assert.True(Frame.TryDecode(w.Payload[4..], out var back));
+        Assert.Equal(FrameType.Key, back.Type);
+        Assert.Equal(0x43, back.U16(0));
+        Assert.False((back.Payload[4] & 1) != 0); // down
+    }
+
+    [Fact]
+    public void Ack_RoundTrips()
+    {
+        Assert.Equal(123456u, Frame.Ack(123456).U32(0));
+    }
+
+    [Fact]
     public void Ping_CarriesTheTimestampAndPongEchoesIt()
     {
         var ping = Frame.Ping(987654321);

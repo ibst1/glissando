@@ -21,6 +21,8 @@ public enum FrameType : byte
     Status = 13,     // flags(1): bit0 = this PC's session is locked, bit1 = power saving
     Detached = 14,   // controlled PC got input while not active: the controller should release
     ControlAlive = 15, // sent periodically by the controller while remote; its absence releases the controlled PC
+    Reliable = 16,   // seq(u32) + an inner encoded frame; delivered in order, retransmitted until acked
+    Ack = 17,        // seq(u32): every reliable frame up to and including this has been delivered
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -44,6 +46,23 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     public short I16(int offset) => BinaryPrimitives.ReadInt16LittleEndian(Payload.AsSpan(offset));
     public ushort U16(int offset) => BinaryPrimitives.ReadUInt16LittleEndian(Payload.AsSpan(offset));
     public int I32(int offset) => BinaryPrimitives.ReadInt32LittleEndian(Payload.AsSpan(offset));
+    public uint U32(int offset) => BinaryPrimitives.ReadUInt32LittleEndian(Payload.AsSpan(offset));
+
+    public static Frame Ack(uint seq)
+    {
+        var p = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(p, seq);
+        return new(FrameType.Ack, p);
+    }
+
+    /// <summary>Wrap an inner frame for reliable delivery: seq(u32) followed by the inner frame's bytes.</summary>
+    public static Frame Reliable(uint seq, byte[] innerEncoded)
+    {
+        var p = new byte[4 + innerEncoded.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(p, seq);
+        innerEncoded.CopyTo(p, 4);
+        return new(FrameType.Reliable, p);
+    }
 
     /// <summary>Ping carries the sender's Stopwatch timestamp; the peer echoes it in a Pong.</summary>
     public static Frame Ping(long timestamp)

@@ -106,7 +106,7 @@ public sealed class Session : IDisposable
     private void SendStatus()
     {
         byte flags = (byte)((LocalLocked ? 1 : 0) | (_powerSaving ? 2 : 0));
-        Enqueue(new Frame(FrameType.Status, [flags]));
+        Send(new Frame(FrameType.Status, [flags]));
     }
 
     /// <summary>Ctrl+Alt+J: jump to the middle of the other PC's first screen without touching an edge.</summary>
@@ -168,7 +168,7 @@ public sealed class Session : IDisposable
         _channel.LinkChanged += OnLinkChanged;
         _channel.StatusChanged += st => { TransportStatus = st; StateChanged?.Invoke(); };
 
-        _capture.Output += OnCaptured;
+        _capture.Output += Send;
         _capture.EnteredRemote += () =>
         {
             if (_s.HideCursorWhileControlling) CursorHider.Hide();
@@ -189,15 +189,16 @@ public sealed class Session : IDisposable
                 Interlocked.Exchange(ref _detachPending, 0);
                 if (_injector.Active || !Authenticated) return;
                 Log.Warn("input keeps arriving while not being controlled; telling the other PC to release");
-                Enqueue(new Frame(FrameType.Detached, []));
+                Send(new Frame(FrameType.Detached, []));
             });
         };
         _injector.ReturnEdgeHit += back =>
         {
-            Enqueue(Frame.ReturnEdge(back));
+            Send(Frame.ReturnEdge(back));
             if (_s.SyncClipboard) SendClipboard();
         };
 
+        _retransmitTimer = new System.Threading.Timer(_ => { try { Retransmit(); } catch { } }, null, RetransmitMs, RetransmitMs);
         _ = Task.Run(() => _channel.RunAsync(_cts.Token));
         _ = Task.Run(SenderLoop);
         _ = Task.Run(TimerLoop);
@@ -235,8 +236,8 @@ public sealed class Session : IDisposable
     {
         Log.Info(up ? $"link up ({(_channel.IsCentral ? "central" : "peripheral")})" : "link down");
         RttMs = 0;
-        // The peer may have restarted and reset its key sequence, so forget which we have seen.
-        lock (_rxGate) { _dedupSeen.Clear(); _dedupOrder.Clear(); }
+        // A fresh connection restarts the reliable stream on both sides.
+        ResetReliable();
         if (up)
         {
             var old = _crypto;
@@ -272,7 +273,7 @@ public sealed class Session : IDisposable
         }
         if (!changed) return;
         Log.Info(v ? $"peer authenticated: {PeerName}" : "peer lost");
-        if (v) SendStatus();
+        if (v) SendStatus(); // the reliable stream is reset on link change, not on re-auth over the same link
         else { PeerLocked = false; PeerPowerSaving = false; }
         StateChanged?.Invoke();
     }
@@ -305,9 +306,22 @@ public sealed class Session : IDisposable
         }
         if (!Frame.TryDecode(plain, out var f)) return;
         _lastPeer = Stopwatch.GetTimestamp();
+        HandleFrame(f);
+    }
 
-        if (IsDuplicate(f)) return; // a redundant copy of a key/button we already applied
+    private void HandleFrame(Frame f)
+    {
+        switch (f.Type)
+        {
+            case FrameType.Reliable: OnReliable(f); break;
+            case FrameType.Ack: OnAck(f); break;
+            default: HandleApp(f); break;
+        }
+    }
 
+    /// <summary>Acts on a delivered frame (arrived unreliably, or in order from the reliable stream).</summary>
+    private void HandleApp(Frame f)
+    {
         switch (f.Type)
         {
             case FrameType.Hello:
@@ -372,7 +386,7 @@ public sealed class Session : IDisposable
                 // The other PC thinks it is controlling us, but we are not being controlled (its Leave or
                 // our ReturnEdge was lost). Tell it to release, so the two sides cannot deadlock with one
                 // stuck "controlling" and thereby blocking the other direction.
-                else Enqueue(new Frame(FrameType.Detached, []));
+                else Send(new Frame(FrameType.Detached, []));
                 break;
 
             case FrameType.Status:
@@ -442,36 +456,100 @@ public sealed class Session : IDisposable
 
     // ---- sending -----------------------------------------------------------------
 
-    // Keys and buttons are rare and must not be lost on the unreliable BLE link: a dropped key-up sticks a
-    // key, a dropped arrow is a missed press. Send each a few times with a sequence id appended, and drop
-    // duplicates on the far side. Mouse moves are not made reliable -- losing one delta is invisible.
-    private const int KeyRedundancy = 3;
-    private ushort _keySeq;
-    private readonly Queue<ushort> _dedupOrder = new();
-    private readonly HashSet<ushort> _dedupSeen = [];
+    // --- reliable ordered delivery -------------------------------------------------
+    // Keys, buttons and the control frames (Enter/Leave/ReturnEdge/Detached/Status) must not be lost on the
+    // lossy BLE link: a dropped key-up sticks a key, a dropped Enter/Leave wedges control. They are numbered,
+    // acknowledged, delivered in order, and retransmitted until acked. Mouse moves stay best-effort (a lost
+    // delta is invisible) and never wait behind a missing reliable frame.
+    private readonly object _relGate = new();
+    private uint _relSendSeq;
+    private readonly SortedDictionary<uint, (byte[] wire, long lastSent)> _unacked = new();
+    private uint _relRecvNext = 1;
+    private readonly SortedDictionary<uint, byte[]> _relRecvBuf = new();
+    private System.Threading.Timer? _retransmitTimer;
+    private const int RetransmitMs = 60;
 
-    private static bool IsReliable(FrameType t) => t is FrameType.Key or FrameType.MouseButton;
+    private static bool IsReliableType(FrameType t) => t is FrameType.Key or FrameType.MouseButton
+        or FrameType.Enter or FrameType.Leave or FrameType.ReturnEdge or FrameType.Detached or FrameType.Status
+        or FrameType.Clipboard;
 
-    private void OnCaptured(Frame f)
+    /// <summary>Send a frame, reliably if its type requires it.</summary>
+    private void Send(Frame f)
     {
-        if (!IsReliable(f.Type)) { Enqueue(f); return; }
-        ushort seq = ++_keySeq;
-        var p = new byte[f.Payload.Length + 2];
-        f.Payload.CopyTo(p, 0);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(f.Payload.Length), seq);
-        var rel = new Frame(f.Type, p);
-        for (int i = 0; i < KeyRedundancy; i++) Enqueue(rel);
+        if (!IsReliableType(f.Type)) { Enqueue(f); return; }
+        byte[] wire;
+        lock (_relGate)
+        {
+            uint seq = ++_relSendSeq;
+            wire = Frame.Reliable(seq, f.Encode()).Payload;
+            _unacked[seq] = (wire, Stopwatch.GetTimestamp());
+        }
+        Enqueue(new Frame(FrameType.Reliable, wire));
     }
 
-    /// <summary>True if this reliable frame is a duplicate copy already applied.</summary>
-    private bool IsDuplicate(Frame f)
+    private void OnReliable(Frame f)
     {
-        if (!IsReliable(f.Type) || f.Payload.Length < 2) return false;
-        ushort seq = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(f.Payload.AsSpan(f.Payload.Length - 2));
-        if (!_dedupSeen.Add(seq)) return true;
-        _dedupOrder.Enqueue(seq);
-        if (_dedupOrder.Count > 512) _dedupSeen.Remove(_dedupOrder.Dequeue());
-        return false;
+        if (f.Payload.Length < 4) return;
+        uint seq = f.U32(0);
+        var inner = f.Payload[4..];
+        var deliver = new List<byte[]>();
+        uint ackUpTo;
+        lock (_relGate)
+        {
+            if (seq == _relRecvNext)
+            {
+                deliver.Add(inner);
+                _relRecvNext++;
+                while (_relRecvBuf.Remove(_relRecvNext, out var b)) { deliver.Add(b); _relRecvNext++; }
+            }
+            else if (seq > _relRecvNext)
+            {
+                _relRecvBuf[seq] = inner; // gap: hold until the missing one is retransmitted
+            }
+            // seq < _relRecvNext: already delivered; just re-ack below.
+            ackUpTo = _relRecvNext - 1;
+        }
+        Enqueue(Frame.Ack(ackUpTo)); // cumulative
+        foreach (var b in deliver)
+            if (Frame.TryDecode(b, out var innerFrame)) HandleApp(innerFrame);
+    }
+
+    private void OnAck(Frame f)
+    {
+        if (f.Payload.Length < 4) return;
+        uint ack = f.U32(0);
+        lock (_relGate)
+        {
+            while (_unacked.Count > 0 && _unacked.Keys.First() <= ack) _unacked.Remove(_unacked.Keys.First());
+        }
+    }
+
+    private void Retransmit()
+    {
+        if (!_channel.IsLinked) return;
+        long now = Stopwatch.GetTimestamp();
+        long threshold = Stopwatch.Frequency * RetransmitMs / 1000;
+        var resend = new List<byte[]>();
+        lock (_relGate)
+        {
+            foreach (var seq in _unacked.Keys.ToList())
+            {
+                var e = _unacked[seq];
+                if (now - e.lastSent >= threshold) { resend.Add(e.wire); _unacked[seq] = (e.wire, now); }
+            }
+        }
+        foreach (var wire in resend) Enqueue(new Frame(FrameType.Reliable, wire));
+    }
+
+    private void ResetReliable()
+    {
+        lock (_relGate)
+        {
+            _relSendSeq = 0;
+            _unacked.Clear();
+            _relRecvNext = 1;
+            _relRecvBuf.Clear();
+        }
     }
 
     private void Enqueue(Frame f)
@@ -575,7 +653,7 @@ public sealed class Session : IDisposable
             if (string.IsNullOrEmpty(text)) return;
             if (text.Length > 60_000) text = text[..60_000];
             byte id = ++_clipId;
-            foreach (var chunk in Frame.ClipboardText(id, text)) Enqueue(chunk);
+            foreach (var chunk in Frame.ClipboardText(id, text)) Send(chunk);
             Log.Info($"clipboard sent ({text.Length} chars)");
         }
         catch (Exception ex) { Log.Warn("clipboard read: " + ex.Message); }
@@ -635,6 +713,7 @@ public sealed class Session : IDisposable
         _injector.Deactivate();
         _cts.Cancel();
         _queue.Writer.TryComplete();
+        _retransmitTimer?.Dispose();
         _channel.Dispose();
         _crypto?.Dispose();
     }
