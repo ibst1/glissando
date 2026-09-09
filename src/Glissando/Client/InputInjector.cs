@@ -19,6 +19,10 @@ public sealed class InputInjector
     public Layout Layout { get; set; }
 
     private Rectangle _screen;
+    // The return crossing is disarmed until the cursor has moved this far in from every edge that leads
+    // back. Without this the cursor, which lands a few px inside on Enter, bounces home on the first jitter.
+    private const int ArmMargin = 24;
+    private bool _returnArmed;
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _keysDown = [];
     private readonly HashSet<byte> _buttonsDown = [];
     private readonly object _gate = new();
@@ -66,6 +70,7 @@ public sealed class InputInjector
         // Land a few pixels inside the edge; crossing back needs a real push toward it, not jitter.
         var p = Layout.ClampIntoMonitor(c.Target, Layout.Add(c.Target, Layout.Unit(c.Dir), 6));
         Native.SetCursorPos(p.X + _screen.X, p.Y + _screen.Y);
+        _returnArmed = false; // must move well clear of the edges before a return counts
         SetActive(true);
     }
 
@@ -75,8 +80,15 @@ public sealed class InputInjector
         Native.Send(Native.Mouse(Native.MOUSEEVENTF_MOVE, dx, dy));
         if (!Native.GetCursorPos(out var cur)) return;
         var p = new Point(cur.X - _screen.X, cur.Y - _screen.Y);
+        if (!_returnArmed)
+        {
+            // Arm once the cursor is clear of every edge that leads back.
+            if (!Layout.NearCrossingEdge(p, ArmMargin)) _returnArmed = true;
+            return;
+        }
         if (Layout.FindCrossing(p, dx, dy) is not Crossing back) return;
         ReleaseAll();
+        _returnArmed = false;
         SetActive(false);
         ReturnEdgeHit?.Invoke(back);
     }

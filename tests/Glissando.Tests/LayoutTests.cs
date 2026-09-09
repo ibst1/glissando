@@ -103,6 +103,16 @@ public class LayoutTests
     }
 
     [Fact]
+    public void NearCrossingEdge_TrueOnlyCloseToACrossingEdge()
+    {
+        var l = Notch();
+        Assert.True(l.NearCrossingEdge(new Point(2565, 500), 24));  // 5 px inside monitor 4's left (a crossing) edge
+        Assert.False(l.NearCrossingEdge(new Point(2600, 500), 24)); // 40 px inside: clear
+        Assert.False(l.NearCrossingEdge(new Point(5, 1500), 24));   // left edge of monitor 1: no peer there
+        Assert.False(l.NearCrossingEdge(new Point(1000, 2000), 24)); // middle of a monitor
+    }
+
+    [Fact]
     public void CrossingSegments_NotchTouchesTwoEdges()
     {
         var segments = Notch().CrossingSegments().OrderBy(s => s.Side).ToArray();

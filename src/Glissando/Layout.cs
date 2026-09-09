@@ -119,6 +119,20 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         return dx * dx + dy * dy;
     }
 
+    /// <summary>True when <paramref name="p"/> is within <paramref name="margin"/> px of any edge that leads to the other PC.</summary>
+    public bool NearCrossingEdge(Point p, int margin)
+    {
+        foreach (var s in CrossingSegments())
+        {
+            bool vertical = s.Side is Dir.Left or Dir.Right;
+            int fixedAxis = vertical ? p.X : p.Y;
+            int alongAxis = vertical ? p.Y : p.X;
+            if (Math.Abs(fixedAxis - s.Fixed) <= margin && alongAxis >= s.From - margin && alongAxis < s.To + margin)
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>Every stretch of my monitor edges that leads to the other PC.</summary>
     public IEnumerable<EdgeSegment> CrossingSegments()
     {
