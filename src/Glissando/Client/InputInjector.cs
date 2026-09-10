@@ -131,27 +131,31 @@ public sealed class InputInjector
         var key = (vk, scan, ext);
         if (up) _keysDown.Remove(key); else _keysDown.Add(key);
         if (Host.InputCapture.KeyLog) Log.Info($"apply key vk=0x{vk:X2} {(up ? "up  " : "down")} ext={ext} scan=0x{scan:X2}");
+
+        // An injected held modifier only sticks to the very next key, so a held Shift gave one capital then
+        // lowercase. Before each non-modifier key-down, re-assert every modifier the controller is holding,
+        // so the modifier is freshly set for this key too.
+        if (!up && vk != 0 && !Native.IsModifierVk(vk))
+            foreach (var m in _keysDown)
+                if (m.vk != 0 && Native.IsModifierVk(m.vk))
+                    SendKey(m.vk, m.scan, up: false, m.ext);
+
         SendKey(vk, scan, up, ext);
     }
 
     /// <summary>
-    /// Inject a key by hardware scancode with the extended-key flag -- exactly what a physical keyboard
-    /// produces. This drives the keyboard-driver path, so a held modifier (Shift/Ctrl/Alt) stays active for
-    /// every following key's character translation. Injecting a modifier by its virtual-key code only
-    /// affected the first following key, so a held Shift gave one capital and then lowercase. Fall back to
-    /// the virtual key only when a key has no scancode. Both PCs must share a keyboard layout.
+    /// Inject a key. Modifiers and most keys go by virtual-key code, which sets the state the OS applies to
+    /// character translation; a held modifier is kept effective for every key by the re-assertion above.
+    /// Fall back to the scancode only for a key that has no virtual-key code.
     /// </summary>
     private static void SendKey(ushort vk, ushort scan, bool up, bool ext)
     {
         uint flags = up ? Native.KEYEVENTF_KEYUP : 0;
         if (ext) flags |= Native.KEYEVENTF_EXTENDEDKEY;
-        if (scan != 0)
-        {
-            flags |= Native.KEYEVENTF_SCANCODE;
-            Native.Send(Native.Keyboard(0, scan, flags));
-        }
+        if (vk != 0)
+            Native.Send(Native.Keyboard(vk, scan, flags));
         else
-            Native.Send(Native.Keyboard(vk, 0, flags));
+            Native.Send(Native.Keyboard(0, scan, flags | Native.KEYEVENTF_SCANCODE));
     }
 
     /// <summary>Release anything still held so nothing sticks when the other PC goes away.</summary>
