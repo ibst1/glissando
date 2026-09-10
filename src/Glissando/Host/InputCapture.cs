@@ -22,6 +22,12 @@ public sealed class InputCapture : IDisposable
     /// <summary>Ctrl+Alt+J was pressed while local: the user wants to jump to the other PC without crossing an edge.</summary>
     public event Action? JumpRequested;
 
+    /// <summary>The user touched this PC's own mouse/keyboard while it was being controlled: take control back.</summary>
+    public event Action? LocalInputWhileControlled;
+
+    /// <summary>True while the other PC is controlling this one (set by the session from the injector state).</summary>
+    public volatile bool BeingControlled;
+
     /// <summary>True while input is being forwarded to the other PC.</summary>
     public volatile bool Remote;
 
@@ -89,7 +95,14 @@ public sealed class InputCapture : IDisposable
 
         // Crossing is detected from raw input (OnRawInput), which keeps firing when Windows has
         // clamped the cursor against the edge and the hook has stopped reporting new positions.
-        if (!Remote) return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+        if (!Remote)
+        {
+            // While this PC is being controlled by the other one, its own physical mouse (the injected
+            // moves carry LLMHF_INJECTED, real ones do not) means the user has grabbed the local mouse:
+            // hand control back so they can use, and re-share, this machine.
+            if (BeingControlled && (info.flags & Native.LLMHF_INJECTED) == 0) LocalInputWhileControlled?.Invoke();
+            return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+        }
 
         switch (msg)
         {
@@ -135,6 +148,8 @@ public sealed class InputCapture : IDisposable
                 JumpRequested?.Invoke();
                 return 1;
             }
+            // A real local keystroke while being controlled means the user wants this machine back.
+            if (BeingControlled && !up && (info.flags & Native.LLKHF_INJECTED) == 0) LocalInputWhileControlled?.Invoke();
             return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
         }
 

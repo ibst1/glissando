@@ -45,14 +45,20 @@ public sealed class InputInjector
         {
             if (f.Type is FrameType.MouseMove or FrameType.MouseButton or FrameType.MouseWheel or FrameType.Key)
                 LastInputTicks = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (!Active && f.Type is FrameType.MouseMove or FrameType.MouseButton or FrameType.MouseWheel or FrameType.Key)
+            if (!Active)
             {
-                // Only Enter starts a session; anything else means the two sides disagree. Say so (rate limited) and ignore.
-                long now = System.Diagnostics.Stopwatch.GetTimestamp();
-                if (now - _lastDetachedTicks > System.Diagnostics.Stopwatch.Frequency / 2)
+                // Ignore any input while inactive. Only a reliable key/button signals a genuine desync: those
+                // are ordered after Enter, so if one arrives while inactive the Enter was truly never sent.
+                // Mouse moves are unreliable and can outrun a slightly delayed Enter, so they must NOT be
+                // read as desync, or the two PCs bounce in and out of control.
+                if (f.Type is FrameType.Key or FrameType.MouseButton)
                 {
-                    _lastDetachedTicks = now;
-                    InputWhileInactive?.Invoke();
+                    long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (now - _lastDetachedTicks > System.Diagnostics.Stopwatch.Frequency / 2)
+                    {
+                        _lastDetachedTicks = now;
+                        InputWhileInactive?.Invoke();
+                    }
                 }
                 return;
             }

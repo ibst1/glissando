@@ -179,7 +179,13 @@ public sealed class Session : IDisposable
         _capture.LockToggleRequested += () => SetLocked(!Locked);
         _capture.JumpRequested += Jump;
 
-        _injector.StateChanged += () => StateChanged?.Invoke();
+        _injector.StateChanged += () => { _capture.BeingControlled = _injector.Active; StateChanged?.Invoke(); };
+        _capture.LocalInputWhileControlled += () =>
+        {
+            if (!_injector.Active) return;
+            Log.Info($"local input on this PC while controlled by {PeerName}; taking control back");
+            _injector.Deactivate(); // the peer stops via the ControlAlive -> Detached handshake
+        };
         _injector.InputWhileInactive += () =>
         {
             // Give a late Enter 300 ms to show up before declaring the two sides out of step.

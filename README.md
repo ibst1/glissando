@@ -48,6 +48,8 @@ the first movement after such a pause takes a little longer to arrive.
 There is no host and client to choose: both PCs run the same thing, and
 whichever PC's own mouse crosses the edge takes control of the other. Untick
 "may control the other PC" on a machine that should only ever be controlled.
+To take a machine back while it is being controlled, just move its own
+mouse or press a key on it.
 
 The placement only needs to be set on one PC; the other adopts it (mirrored)
 when they connect. Whichever PC's placement was edited most recently wins.
