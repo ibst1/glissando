@@ -415,7 +415,6 @@ public sealed class Session : IDisposable
 
             case FrameType.Enter:
                 if (!Authenticated) break;
-                Log.Info($"received Enter (capture.Remote={_capture.Remote} injector.Active={_injector.Active})");
                 if (_capture.Remote) _capture.Release(); // cannot control each other at once
                 _injector.Apply(f);
                 break;

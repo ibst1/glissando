@@ -6,8 +6,10 @@ other, keystrokes follow, and clipboard text comes along. The link is
 Bluetooth Low Energy, so it works across corporate networks, domains and
 firewalls, and it needs no administrator rights on either machine.
 
-Status: **early prototype** (v0.3). Built and exercised on the author's own
-two machines; expect rough edges.
+Status: **working prototype** (v0.3). Mouse, keyboard (including held
+modifiers like Shift+arrow and Ctrl+C/V) and clipboard work in both
+directions between the author's two machines over Bluetooth LE. Link
+quality between the specific adapters sets the latency floor.
 
 ## How it differs from Mouse without Borders, Synergy, Input Leap
 
