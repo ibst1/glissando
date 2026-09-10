@@ -45,12 +45,11 @@ public sealed class InputInjector
         {
             if (f.Type is FrameType.MouseMove or FrameType.MouseButton or FrameType.MouseWheel or FrameType.Key)
                 LastInputTicks = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (!Active)
+            // Enter must always be processed -- it is what activates us. Everything else while inactive is
+            // ignored: a key/button signals a genuine desync (rate limited), a stray mouse move is just an
+            // unreliable frame that outran the Enter and must NOT be read as desync.
+            if (!Active && f.Type != FrameType.Enter)
             {
-                // Ignore any input while inactive. Only a reliable key/button signals a genuine desync: those
-                // are ordered after Enter, so if one arrives while inactive the Enter was truly never sent.
-                // Mouse moves are unreliable and can outrun a slightly delayed Enter, so they must NOT be
-                // read as desync, or the two PCs bounce in and out of control.
                 if (f.Type is FrameType.Key or FrameType.MouseButton)
                 {
                     long now = System.Diagnostics.Stopwatch.GetTimestamp();
