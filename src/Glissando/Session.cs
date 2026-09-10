@@ -128,7 +128,7 @@ public sealed class Session : IDisposable
         sb.AppendLine($"Bluetooth: {adapterInfo}");
         sb.AppendLine($"Transport: {TransportStatus}; linked={Linked} role={(Linked ? (_channel.IsCentral ? "central" : "peripheral") : "-")} authenticated={Authenticated} peer='{PeerName}' rtt={RttMs:F0} ms");
         sb.AppendLine($"State: controlling={Controlling} controlled={Controlled} locked={Locked} sessionLocked={LocalLocked} peerLocked={PeerLocked} powerSaving={_powerSaving} peerPowerSaving={PeerPowerSaving} idle={Native.IdleMs() / 1000} s");
-        sb.AppendLine($"Counters: movesForwarded={Interlocked.Read(ref _capture.MovesForwarded)} rejectedPackets={Rejected} queued={Volatile.Read(ref _queued)}");
+        sb.AppendLine($"Counters: movesForwarded={Interlocked.Read(ref _capture.MovesForwarded)} rejectedPackets={Rejected} queued={Volatile.Read(ref _queued)} unacked={_unacked.Count} retransmits={_retransmits}");
         sb.AppendLine($"Settings: ble={_s.Ble} capture={_s.CaptureEnabled} clipboard={_s.SyncClipboard} hideCursor={_s.HideCursorWhileControlling} powerSave={_s.PowerSaveWhenIdle} keepalive={_s.KeepaliveMs} timeout={_s.PeerTimeoutMs} passphrase={(string.IsNullOrEmpty(_s.Passphrase) ? "(empty)" : $"set, {_s.Passphrase.Length} chars")} placementUpdated={_s.PlacementUpdated}");
         sb.AppendLine($"Layout: peerOrigin={layout.PeerOrigin} virtualScreen={Layout.MyVirtualScreen()}");
         foreach (var m in layout.Mine) sb.AppendLine($"  mine #{m.Number}: {m.Bounds}");
@@ -198,7 +198,7 @@ public sealed class Session : IDisposable
             if (_s.SyncClipboard) SendClipboard();
         };
 
-        _retransmitTimer = new System.Threading.Timer(_ => { try { Retransmit(); } catch { } }, null, RetransmitMs, RetransmitMs);
+        _retransmitTimer = new System.Threading.Timer(_ => { try { Retransmit(); } catch { } }, null, RetransmitCheckMs, RetransmitCheckMs);
         _ = Task.Run(() => _channel.RunAsync(_cts.Token));
         _ = Task.Run(SenderLoop);
         _ = Task.Run(TimerLoop);
@@ -463,11 +463,13 @@ public sealed class Session : IDisposable
     // delta is invisible) and never wait behind a missing reliable frame.
     private readonly object _relGate = new();
     private uint _relSendSeq;
-    private readonly SortedDictionary<uint, (byte[] wire, long lastSent)> _unacked = new();
+    // sent=false while the frame is still queued (not yet on the air): it must not be retransmitted then,
+    // or a slow send direction would pile copies onto an already-congested queue and lag worse.
+    private readonly SortedDictionary<uint, (byte[] wire, long lastSent, bool sent)> _unacked = new();
     private uint _relRecvNext = 1;
     private readonly SortedDictionary<uint, byte[]> _relRecvBuf = new();
     private System.Threading.Timer? _retransmitTimer;
-    private const int RetransmitMs = 60;
+    private const int RetransmitCheckMs = 40;
 
     private static bool IsReliableType(FrameType t) => t is FrameType.Key or FrameType.MouseButton
         or FrameType.Enter or FrameType.Leave or FrameType.ReturnEdge or FrameType.Detached or FrameType.Status
@@ -482,7 +484,7 @@ public sealed class Session : IDisposable
         {
             uint seq = ++_relSendSeq;
             wire = Frame.Reliable(seq, f.Encode()).Payload;
-            _unacked[seq] = (wire, Stopwatch.GetTimestamp());
+            _unacked[seq] = (wire, Stopwatch.GetTimestamp(), false);
         }
         Enqueue(new Frame(FrameType.Reliable, wire));
     }
@@ -528,18 +530,24 @@ public sealed class Session : IDisposable
     {
         if (!_channel.IsLinked) return;
         long now = Stopwatch.GetTimestamp();
-        long threshold = Stopwatch.Frequency * RetransmitMs / 1000;
+        // Wait about two round trips before resending, so an ack in flight is not pre-empted.
+        double waitMs = Math.Clamp(RttMs > 0 ? RttMs * 2.2 : 90, 80, 400);
+        long threshold = (long)(Stopwatch.Frequency * waitMs / 1000);
         var resend = new List<byte[]>();
         lock (_relGate)
         {
             foreach (var seq in _unacked.Keys.ToList())
             {
                 var e = _unacked[seq];
-                if (now - e.lastSent >= threshold) { resend.Add(e.wire); _unacked[seq] = (e.wire, now); }
+                // Only retransmit what has actually been sent and gone unacked; leave still-queued frames alone.
+                if (e.sent && now - e.lastSent >= threshold) { resend.Add(e.wire); _unacked[seq] = (e.wire, e.lastSent, false); }
             }
         }
         foreach (var wire in resend) Enqueue(new Frame(FrameType.Reliable, wire));
+        _retransmits += resend.Count;
     }
+
+    private long _retransmits;
 
     private void ResetReliable()
     {
@@ -585,6 +593,13 @@ public sealed class Session : IDisposable
                     if (crypto == null || !_channel.IsLinked) continue;
                     var packet = crypto.Seal(f.Encode());
                     _lastSend = Stopwatch.GetTimestamp();
+                    // Mark a reliable frame as on-the-air now, so the retransmit clock starts from the real
+                    // send time rather than the enqueue time.
+                    if (f.Type == FrameType.Reliable && f.Payload.Length >= 4)
+                    {
+                        uint seq = f.U32(0);
+                        lock (_relGate) { if (_unacked.TryGetValue(seq, out var e)) _unacked[seq] = (e.wire, _lastSend, true); }
+                    }
                     await _channel.SendAsync(packet);
                 }
             }
