@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Glissando.Host;
 
@@ -50,6 +51,14 @@ public sealed class InputCapture : IDisposable
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _keysDown = [];
     private readonly HashSet<byte> _buttonsDown = [];
     private readonly byte[] _rawBuf = new byte[128];
+
+    // A named event that exists only while this PC is actively controlling the other one. It is a passive
+    // signal any sibling tool may read; Glissando does not depend on anyone reading it. Sostenuto uses it to
+    // suspend its CapsLock stuck-key probe while remote: that probe travels the hook chain and is swallowed
+    // and forwarded here, so without the signal Sostenuto reads it as a blocker and drops its modifier
+    // mid-hold. Session-local name (no "Global\"), so it needs no privilege and is scoped to this login.
+    private const string RemoteSignalName = "Glissando.ControllingRemote";
+    private EventWaitHandle? _remoteSignal;
 
     // Enter/leave may be called from the hook (UI thread), the receive thread and the timer thread.
     // Without this the hook could re-enter remote mode in the middle of a leave and win the race.
@@ -249,6 +258,7 @@ public sealed class InputCapture : IDisposable
         {
             if (Remote || Stopwatch.GetTimestamp() < _ignoreEdgeUntil) return;
             Remote = true;
+            RaiseRemoteSignal();
             _keysDown.Clear();
             _buttonsDown.Clear();
             Log.Info($"entering remote: {c.Dir} -> peer {c.Target}");
@@ -265,6 +275,7 @@ public sealed class InputCapture : IDisposable
             // Close the door before anything else: a cursor still parked on the edge must not re-enter.
             _ignoreEdgeUntil = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 4;
             Remote = false;
+            ClearRemoteSignal();
             LeaveRemoteCore(back);
         }
         Log.Info("left remote");
@@ -298,9 +309,24 @@ public sealed class InputCapture : IDisposable
         _ignoreEdgeUntil = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 4;
     }
 
+    // Held (created) only while remote, so a reader sees the name resolve exactly while we control the peer.
+    // Best-effort: a failure here must never break control, so the signal is simply absent if it cannot form.
+    private void RaiseRemoteSignal()
+    {
+        try { _remoteSignal ??= new EventWaitHandle(false, EventResetMode.ManualReset, RemoteSignalName); }
+        catch { _remoteSignal = null; }
+    }
+
+    private void ClearRemoteSignal()
+    {
+        try { _remoteSignal?.Dispose(); } catch { }
+        _remoteSignal = null;
+    }
+
     public void Dispose()
     {
         LeaveRemote(null);
+        ClearRemoteSignal();
         if (_mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_mouseHook);
         if (_keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_keyHook);
         _mouseHook = _keyHook = IntPtr.Zero;
