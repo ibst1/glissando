@@ -184,8 +184,8 @@ public sealed class InputCapture : IDisposable
         return 1;
     }
 
-    /// <summary>Log every key forwarded and applied, to diagnose lost keystrokes. On by default for now.</summary>
-    public static bool KeyLog = true;
+    /// <summary>Log every key forwarded and applied, to diagnose lost keystrokes. Enable with --keylog.</summary>
+    public static bool KeyLog;
 
     private bool CtrlDown() => _keysDown.Any(k => k.vk is Native.VK_LCONTROL or Native.VK_RCONTROL);
     private bool AltDown() => _keysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU);
