@@ -52,6 +52,7 @@ public sealed class Session : IDisposable
 
     private bool _powerSaving;
     private int _detachPending;
+    private long _lastDetachLog;
 
     private readonly Settings _s;
     private readonly IChannel _channel;
@@ -388,7 +389,12 @@ public sealed class Session : IDisposable
                 // The other PC thinks it is controlling us, but we are not being controlled (its Leave or
                 // our ReturnEdge was lost). Tell it to release, so the two sides cannot deadlock with one
                 // stuck "controlling" and thereby blocking the other direction.
-                else Send(new Frame(FrameType.Detached, []));
+                else
+                {
+                    long nowT = Stopwatch.GetTimestamp();
+                    if (nowT - _lastDetachLog > Stopwatch.Frequency) { _lastDetachLog = nowT; Log.Info("got ControlAlive but our injector is inactive; sending Detached"); }
+                    Send(new Frame(FrameType.Detached, []));
+                }
                 break;
 
             case FrameType.Status:
@@ -409,6 +415,7 @@ public sealed class Session : IDisposable
 
             case FrameType.Enter:
                 if (!Authenticated) break;
+                Log.Info($"received Enter (capture.Remote={_capture.Remote} injector.Active={_injector.Active})");
                 if (_capture.Remote) _capture.Release(); // cannot control each other at once
                 _injector.Apply(f);
                 break;
