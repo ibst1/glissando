@@ -75,6 +75,12 @@ Glissando.exe --ble connect --console pin the Bluetooth role, show the log
 * Mouse movement, buttons, wheel; keyboard including Win and Alt combinations.
   Keys are sent as scan codes, so both PCs should use the same keyboard layout.
 * Clipboard text is copied across each time the cursor crosses over.
+* A **Bluetooth mouse or keyboard on the controlling PC shares this one Bluetooth
+  radio with Glissando.** While you move such a mouse it floods the radio with its
+  own reports and the link to the other PC stutters, felt as lag in the direction
+  you are driving and only while the mouse moves. Drive from a wired mouse, a
+  2.4 GHz-dongle mouse, or the trackpad; a Bluetooth mouse is fine on the PC being
+  controlled. Glissando cannot schedule around a second device on the same radio.
 * Multi-monitor: both PCs' monitors live in one shared coordinate space. The
   other PC's screens can stand beside, above, below, or in an empty corner of
   this PC's desktop; every monitor edge that borders one of its screens, with

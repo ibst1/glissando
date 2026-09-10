@@ -64,6 +64,8 @@ public sealed class Session : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly byte[] _myNonce = new byte[16];
     private long _lastPeer, _lastSend, _lastHello;
+    private long _lastActivePing, _lastRttLog;
+    private double _lastRttLogged;
     private int _queued;
     private byte _clipId;
     private string? _lastClipboardSent;
@@ -269,7 +271,12 @@ public sealed class Session : IDisposable
     {
         RandomNumberGenerator.Fill(_myNonce);
         var layout = _capture.Layout;
-        Enqueue(Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version)));
+        var hello = Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version));
+        // The monitor layout travels in Hello. A display or settings change mid-session sends one Hello, and on
+        // this lossy link a single packet can be lost, leaving the peer with a stale arrangement -- the two
+        // dialogs then disagree and a corner monitor becomes unreachable. Send a few copies so the update
+        // survives loss; adopting the same Hello twice is idempotent and the extra HelloAcks are harmless.
+        for (int i = 0; i < Redundancy; i++) Enqueue(hello);
         _lastHello = Stopwatch.GetTimestamp();
     }
 
@@ -586,6 +593,30 @@ public sealed class Session : IDisposable
 
                 // While controlling, tell the other PC so it stays active even when the mouse is still.
                 if (_capture.Remote) Enqueue(new Frame(FrameType.ControlAlive, []));
+
+                // Keep the round trip fresh while control is active, so the diagnostic below samples the live
+                // latency rather than the last idle ping (mouse moves keep _lastSend fresh, so the normal
+                // keepalive ping rarely fires while controlling). A ping is a few bytes at 2 Hz.
+                if ((_capture.Remote || _injector.Active) && now - _lastActivePing > Stopwatch.Frequency / 2)
+                {
+                    _lastActivePing = now;
+                    Enqueue(Frame.Ping(now));
+                }
+
+                // Log the round trip, so an intermittent lag on a healthy link is captured with a timestamp:
+                // a heartbeat every few seconds, plus an immediate line whenever it jumps, since the spikes
+                // are the interesting moments. This is what tells interval drift (RTT climbs and stays) from
+                // radio congestion (RTT spikes erratically) without another two-PC session.
+                if (Authenticated && RttMs > 0)
+                {
+                    bool spike = RttMs > 45 && RttMs > _lastRttLogged * 1.6 && now - _lastRttLog > Stopwatch.Frequency / 2;
+                    if (spike || now - _lastRttLog > Stopwatch.Frequency * 15)
+                    {
+                        _lastRttLog = now;
+                        _lastRttLogged = RttMs;
+                        Log.Info($"rtt {RttMs:F0} ms controlling={_capture.Remote} controlled={_injector.Active}");
+                    }
+                }
 
                 // If we are being controlled but the controller has gone silent (a lost Leave, or it
                 // crashed), release: no input or heartbeat for 1.2 s. The heartbeat above is 4x/s, so a

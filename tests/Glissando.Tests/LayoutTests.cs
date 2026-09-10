@@ -131,6 +131,31 @@ public class LayoutTests
     }
 
     [Fact]
+    public void SmallStep_BridgedSoBothMonitorsCross()
+    {
+        // A tall and a short monitor side by side; the short one's bottom is 8 px above the tall one's -- the
+        // DPI step Windows leaves between a 2160- and a 1080-tall screen, which it will not let you nudge away.
+        // A single peer sits flush below the tall one. Both must cross to it: the tall one exactly, the short
+        // one across the 8 px step.
+        MonitorRect[] mine = [new(new Rectangle(0, 0, 100, 100), 1), new(new Rectangle(100, 0, 100, 92), 2)];
+        MonitorRect[] peer = [new(new Rectangle(0, 0, 200, 50), 1)];
+        var layout = new Layout(mine, peer, new Point(0, 100)); // peer occupies y 100..150
+
+        Assert.NotNull(layout.FindCrossing(new Point(50, 99), 0, 1));   // tall monitor, flush
+        Assert.NotNull(layout.FindCrossing(new Point(150, 91), 0, 1));  // short monitor, 8 px step bridged
+        Assert.Equal(2, layout.CrossingSegments().Count(s => s.Side == Dir.Down));
+    }
+
+    [Fact]
+    public void GapBeyondTolerance_StillDoesNotCross()
+    {
+        MonitorRect[] mine = [new(new Rectangle(100, 0, 100, 92), 1)];
+        MonitorRect[] peer = [new(new Rectangle(0, 0, 200, 50), 1)];
+        var layout = new Layout(mine, peer, new Point(0, 120)); // peer 28 px below the monitor's bottom
+        Assert.Null(layout.FindCrossing(new Point(150, 91), 0, 1));
+    }
+
+    [Fact]
     public void Snap_IntoTheNotch_TouchesBothEdges()
     {
         var origin = Layout.Snap(Four, Laptop, new Point(700, 50));

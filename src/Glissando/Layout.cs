@@ -25,6 +25,13 @@ public readonly record struct EdgeSegment(Dir Side, int Fixed, int From, int To)
 /// </summary>
 public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOrigin)
 {
+    /// <summary>A peer monitor within this many pixels of flush against one of my edges still counts as a
+    /// crossing. Mixed-resolution monitors that Windows snaps together leave a small step (DPI rounding: an
+    /// 8 px gap between a 2160- and a 1080-tall screen was the case that motivated this), and the user cannot
+    /// nudge it away in Display settings. One of my own monitors in the gap still blocks, so this only bridges
+    /// genuinely-empty small steps, never crosses through my own screen.</summary>
+    private const int EdgeTolerance = 16;
+
     public static Point Unit(Dir d) => d switch
     {
         Dir.Left => new Point(-1, 0),
@@ -84,10 +91,18 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
                 };
                 if (!onEdge) continue;
                 if (hasDelta && !Toward(d, dx, dy)) continue;
-                var q = Add(p, Unit(d));
-                if (Mine.Any(o => Contains(o.Bounds, q))) continue;   // a seam to another of my monitors
-                if (!peer.Any(o => Contains(o.Bounds, q))) continue;  // empty desktop, not the peer
-                candidates.Add(new Crossing(d, new Point(q.X - PeerOrigin.X, q.Y - PeerOrigin.Y)));
+                // Scan up to EdgeTolerance px beyond the edge: a peer screen a few px away (a small snap step)
+                // still counts, but one of my own monitors in the way blocks first, so a seam to my own screen
+                // never becomes a crossing.
+                Point? hit = null;
+                for (int k = 1; k <= EdgeTolerance; k++)
+                {
+                    var q = Add(p, Unit(d), k);
+                    if (Mine.Any(o => Contains(o.Bounds, q))) break;
+                    if (peer.Any(o => Contains(o.Bounds, q))) { hit = q; break; }
+                }
+                if (hit is not Point qp) continue;
+                candidates.Add(new Crossing(d, new Point(qp.X - PeerOrigin.X, qp.Y - PeerOrigin.Y)));
             }
         }
         if (candidates.Count == 0) return null;
@@ -143,12 +158,14 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
             foreach (Dir d in Enum.GetValues<Dir>())
             {
                 bool vertical = d is Dir.Left or Dir.Right;
+                // The strip reaches EdgeTolerance px beyond the edge, so a peer a small step away still shows a
+                // crossing; one of my own monitors in the strip is subtracted below and blocks it.
                 Rectangle strip = d switch
                 {
-                    Dir.Left => new Rectangle(r.Left - 1, r.Top, 1, r.Height),
-                    Dir.Right => new Rectangle(r.Right, r.Top, 1, r.Height),
-                    Dir.Up => new Rectangle(r.Left, r.Top - 1, r.Width, 1),
-                    _ => new Rectangle(r.Left, r.Bottom, r.Width, 1),
+                    Dir.Left => new Rectangle(r.Left - EdgeTolerance, r.Top, EdgeTolerance, r.Height),
+                    Dir.Right => new Rectangle(r.Right, r.Top, EdgeTolerance, r.Height),
+                    Dir.Up => new Rectangle(r.Left, r.Top - EdgeTolerance, r.Width, EdgeTolerance),
+                    _ => new Rectangle(r.Left, r.Bottom, r.Width, EdgeTolerance),
                 };
                 // Rectangle.Intersect returns zero-width/height rectangles for edges that merely touch;
                 // only overlaps with real area count.

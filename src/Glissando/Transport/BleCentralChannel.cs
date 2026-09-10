@@ -17,7 +17,6 @@ public sealed class BleCentralChannel : IChannel
 
     private BluetoothLEDevice? _device;
     private GattSession? _session;
-    private BluetoothLEPreferredConnectionParametersRequest? _connParams;
     private GattDeviceService? _service;
     private GattCharacteristic? _rx, _tx;
     private TaskCompletionSource? _dropped;
@@ -88,19 +87,10 @@ public sealed class BleCentralChannel : IChannel
         var sub = await _tx.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify);
         if (sub != GattCommunicationStatus.Success) { Log.Warn($"subscribe {sub}"); return; }
 
-        // The controlled PC's input reaches us over Notify (peripheral -> central), which lands only on a
-        // connection event, so the connection interval is this direction's latency floor. The central owns
-        // that interval, and Windows otherwise settles on a balanced ~30 ms one that feels laggy. Ask for the
-        // throughput-optimised profile: shortest interval (~7.5 ms) and zero slave latency. Best-effort; the
-        // request is held for the life of the link and reverted on teardown. The other direction is already
-        // fast (WriteWithoutResponse), so this is what closes the asymmetry.
-        try
-        {
-            _connParams = _device.RequestPreferredConnectionParameters(BluetoothLEPreferredConnectionParameters.ThroughputOptimized);
-            Log.Info($"requested throughput-optimised connection parameters: {_connParams.Status}");
-        }
-        catch (Exception ex) { Log.Warn("connection-parameter request failed: " + ex.Message); }
-
+        // Connection parameters are left at Windows' default. The 2026-09-08 transport tests measured default
+        // as the fastest here (~13 ms median); RequestPreferredConnectionParameters(ThroughputOptimized) was
+        // slower (p50 27-56 ms). The lag that looked like interval drift was a Bluetooth mouse on the
+        // controlling PC sharing this one radio, not the interval, so there is nothing to tune here.
         Log.Info($"BLE linked to {_device.Name} ({address:X12}), maxPdu {_session.MaxPduSize}");
         IsLinked = true;
         StatusChanged?.Invoke("linked");
@@ -148,8 +138,6 @@ public sealed class BleCentralChannel : IChannel
         IsLinked = false;
         if (_tx != null) _tx.ValueChanged -= OnValueChanged;
         _rx = null; _tx = null;
-        try { _connParams?.Dispose(); } catch { }
-        _connParams = null;
         try { _service?.Dispose(); } catch { }
         try { _session?.Dispose(); } catch { }
         try { _device?.Dispose(); } catch { }

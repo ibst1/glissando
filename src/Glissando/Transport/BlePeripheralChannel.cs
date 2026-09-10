@@ -62,18 +62,30 @@ public sealed class BlePeripheralChannel : IChannel
         _provider.StartAdvertising(_advParams);
         StatusChanged?.Invoke("advertising");
 
-        // Windows sometimes reports Aborted right after StartAdvertising and, on some
-        // machines, never recovers on its own. Poke it until it sticks.
+        // Windows sometimes reports Aborted right after StartAdvertising and, on some machines recovers on a
+        // poke. But an adapter that cannot advertise at all (the peer's is one) never recovers, and poking it
+        // every 2 s forever churns the radio during the very window the central half is trying to scan and
+        // connect. So give up after a few tries and go quiet: BleAutoChannel already treats "not advertising"
+        // as "this PC connects", and scanning continues regardless. A run that does start resets the budget.
+        const int maxRestarts = 8;
+        int fails = 0;
         while (!ct.IsCancellationRequested)
         {
             try { await Task.Delay(2000, ct); } catch (OperationCanceledException) { break; }
             var st = _provider.AdvertisementStatus;
             if (st is GattServiceProviderAdvertisementStatus.Aborted or GattServiceProviderAdvertisementStatus.Stopped)
             {
-                Log.Warn($"BLE advertising is {st}; restarting");
+                if (fails >= maxRestarts)
+                {
+                    if (fails == maxRestarts) { fails++; Log.Warn($"BLE advertising will not start after {maxRestarts} tries; giving up (this PC acts as central only)"); }
+                    continue;
+                }
+                fails++;
+                Log.Warn($"BLE advertising is {st}; restarting ({fails}/{maxRestarts})");
                 try { _provider.StartAdvertising(_advParams); }
                 catch (Exception ex) { Log.Error("StartAdvertising: " + ex.Message); }
             }
+            else if (st == GattServiceProviderAdvertisementStatus.Started) fails = 0;
         }
         try { _provider.StopAdvertising(); } catch { }
     }
