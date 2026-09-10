@@ -180,7 +180,12 @@ public sealed class Session : IDisposable
         _capture.LockToggleRequested += () => SetLocked(!Locked);
         _capture.JumpRequested += Jump;
 
-        _injector.StateChanged += () => { _capture.BeingControlled = _injector.Active; StateChanged?.Invoke(); };
+        _injector.StateChanged += () =>
+        {
+            _capture.BeingControlled = _injector.Active;
+            if (_injector.Active) _capture.SuppressTakeBack(300); // ignore the cursor-placement settle
+            StateChanged?.Invoke();
+        };
         _capture.LocalInputWhileControlled += () =>
         {
             if (!_injector.Active) return;

@@ -85,7 +85,9 @@ public sealed class InputInjector
         _screen = Layout.MyVirtualScreen();
         // Land a few pixels inside the edge; crossing back needs a real push toward it, not jitter.
         var p = Layout.ClampIntoMonitor(c.Target, Layout.Add(c.Target, Layout.Unit(c.Dir), 6));
-        Native.SetCursorPos(p.X + _screen.X, p.Y + _screen.Y);
+        // Absolute SendInput (not SetCursorPos) so this placement is flagged injected and does not trip the
+        // controlled PC's own take-back detection.
+        Native.MoveCursorAbsolute(p.X + _screen.X, p.Y + _screen.Y);
         _returnArmed = false; // must move well clear of the edges before a return counts
         SetActive(true);
     }

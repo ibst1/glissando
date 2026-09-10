@@ -28,6 +28,11 @@ public sealed class InputCapture : IDisposable
     /// <summary>True while the other PC is controlling this one (set by the session from the injector state).</summary>
     public volatile bool BeingControlled;
 
+    private long _takeBackAllowedAt;
+    /// <summary>Ignore take-back briefly (e.g. right after control starts, while the cursor is being placed).</summary>
+    public void SuppressTakeBack(int ms) => _takeBackAllowedAt = Stopwatch.GetTimestamp() + Stopwatch.Frequency * ms / 1000;
+    private bool TakeBackArmed => Stopwatch.GetTimestamp() >= _takeBackAllowedAt;
+
     /// <summary>True while input is being forwarded to the other PC.</summary>
     public volatile bool Remote;
 
@@ -100,7 +105,7 @@ public sealed class InputCapture : IDisposable
             // While this PC is being controlled by the other one, its own physical mouse (the injected
             // moves carry LLMHF_INJECTED, real ones do not) means the user has grabbed the local mouse:
             // hand control back so they can use, and re-share, this machine.
-            if (BeingControlled && (info.flags & Native.LLMHF_INJECTED) == 0) LocalInputWhileControlled?.Invoke();
+            if (BeingControlled && TakeBackArmed && (info.flags & Native.LLMHF_INJECTED) == 0) LocalInputWhileControlled?.Invoke();
             return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
         }
 
@@ -149,7 +154,7 @@ public sealed class InputCapture : IDisposable
                 return 1;
             }
             // A real local keystroke while being controlled means the user wants this machine back.
-            if (BeingControlled && !up && (info.flags & Native.LLKHF_INJECTED) == 0) LocalInputWhileControlled?.Invoke();
+            if (BeingControlled && TakeBackArmed && !up && (info.flags & Native.LLKHF_INJECTED) == 0) LocalInputWhileControlled?.Invoke();
             return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
         }
 

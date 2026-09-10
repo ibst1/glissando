@@ -170,6 +170,19 @@ internal static class Native
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetCursorPos(int x, int y);
 
+    /// <summary>
+    /// Move the cursor to an absolute screen position via SendInput, so it carries the injected flag
+    /// (SetCursorPos does not). Used by the controlled side so its own placement is not mistaken for the
+    /// local user grabbing the mouse.
+    /// </summary>
+    public static void MoveCursorAbsolute(int x, int y)
+    {
+        var v = VirtualScreen();
+        int nx = (int)((long)(x - v.Left) * 65535 / Math.Max(1, v.Width - 1));
+        int ny = (int)((long)(y - v.Top) * 65535 / Math.Max(1, v.Height - 1));
+        Send(Mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny));
+    }
+
     [DllImport("user32.dll")]
     public static extern int GetSystemMetrics(int nIndex);
 
