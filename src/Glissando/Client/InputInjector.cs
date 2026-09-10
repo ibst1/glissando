@@ -135,19 +135,23 @@ public sealed class InputInjector
     }
 
     /// <summary>
-    /// Inject a key. Prefer the virtual-key code: injecting Shift/Ctrl/Alt by scancode alone does not
-    /// reliably update the modifier state the OS applies to the following key, so capitals and Ctrl+C/V
-    /// were lost. Both PCs are expected to share a keyboard layout, so the vk is meaningful. Fall back to
-    /// the scancode only when there is no vk.
+    /// Inject a key by hardware scancode with the extended-key flag -- exactly what a physical keyboard
+    /// produces. This drives the keyboard-driver path, so a held modifier (Shift/Ctrl/Alt) stays active for
+    /// every following key's character translation. Injecting a modifier by its virtual-key code only
+    /// affected the first following key, so a held Shift gave one capital and then lowercase. Fall back to
+    /// the virtual key only when a key has no scancode. Both PCs must share a keyboard layout.
     /// </summary>
     private static void SendKey(ushort vk, ushort scan, bool up, bool ext)
     {
         uint flags = up ? Native.KEYEVENTF_KEYUP : 0;
         if (ext) flags |= Native.KEYEVENTF_EXTENDEDKEY;
-        if (vk != 0)
-            Native.Send(Native.Keyboard(vk, scan, flags));
+        if (scan != 0)
+        {
+            flags |= Native.KEYEVENTF_SCANCODE;
+            Native.Send(Native.Keyboard(0, scan, flags));
+        }
         else
-            Native.Send(Native.Keyboard(0, scan, flags | Native.KEYEVENTF_SCANCODE));
+            Native.Send(Native.Keyboard(vk, 0, flags));
     }
 
     /// <summary>Release anything still held so nothing sticks when the other PC goes away.</summary>
