@@ -638,6 +638,16 @@ public sealed class Session : IDisposable
                     SetAuthenticated(false);
                 }
 
+                // The mirror of the controlled side's rule further down: while we control the other PC it
+                // answers our 2 Hz pings, so 1.5 s without a frame means it is gone - exited without a word,
+                // crashed, radio lost. Let go of the pointer now, not after the general peer timeout above:
+                // stuck on a dead remote screen is the one wait the user cannot do anything about.
+                if (_capture.Remote && sincePeer > 1500)
+                {
+                    Log.Warn($"controlling, but no frames from {PeerName} for {sincePeer:F0} ms; releasing");
+                    _capture.Release();
+                }
+
                 // While controlling, tell the other PC so it stays active even when the mouse is still.
                 if (_capture.Remote) Enqueue(new Frame(FrameType.ControlAlive, []));
 
@@ -751,12 +761,29 @@ public sealed class Session : IDisposable
     public void Dispose()
     {
         StopMirror();
+        // Tell the other PC before the link goes. Being controlled, send Detached so the controller lets go of
+        // the pointer at once (its own fallbacks - link down, peer timeout - take seconds, spent staring at a
+        // dead remote screen). Controlling, Release() below sends Leave, which frees the controlled PC without
+        // its 1.2 s silence rule. Both go through the sender queue, and cancelling that queue is what Dispose
+        // did next - so the frames never left. Drain it first, bounded: exiting must never hang on a dead link.
+        if (Authenticated && _injector.Active) Send(new Frame(FrameType.Detached, []));
         _capture.Release();
         CursorHider.Restore();
         _injector.Deactivate();
+        DrainSendQueue(400);
         _cts.Cancel();
         _queue.Writer.TryComplete();
         _channel.Dispose();
         _crypto?.Dispose();
+    }
+
+    /// <summary>Wait, at most maxMs, for the sender loop to hand every queued frame to the channel. _queued
+    /// drops when a frame is taken off the queue, before its SendAsync completes, so a short grace period
+    /// follows for the last write in flight.</summary>
+    private void DrainSendQueue(int maxMs)
+    {
+        var sw = Stopwatch.StartNew();
+        while (Volatile.Read(ref _queued) > 0 && _channel.IsLinked && sw.ElapsedMilliseconds < maxMs) Thread.Sleep(10);
+        if (_channel.IsLinked) Thread.Sleep(80);
     }
 }
