@@ -86,9 +86,10 @@ internal static class Program
             return 0;
         }
 
-        // If the cursor set was swapped out while controlling the other PC, put it back no matter how we end.
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => Host.CursorHider.Restore();
-        AppDomain.CurrentDomain.UnhandledException += (_, _) => Host.CursorHider.Restore();
+        // If the cursor set was swapped out while controlling the other PC, or a mirrored window was made
+        // invisible, put them back no matter how we end.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => { Host.CursorHider.Restore(); Mirror.WindowHider.Unhide(); };
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => { Host.CursorHider.Restore(); Mirror.WindowHider.Unhide(); };
 
         // One instance per user. Wait a little so "restart" from the settings dialog works.
         using var single = new Mutex(false, "Glissando-" + Environment.UserName);
@@ -106,6 +107,8 @@ internal static class Program
         // was hidden, the whole system is left with blank cursors; this heals it whatever the setting says,
         // so the user can never be stuck unable to click. It just reloads the user's own cursors otherwise.
         Host.CursorHider.RestoreSchemeAtStartup();
+        // Likewise a window left invisible by an instance that was killed while mirroring it.
+        Mirror.WindowHider.HealAtStartup();
         if (overrides.TryGetValue("ble", out var b) && Enum.TryParse<BleMode>(b, true, out var ble)) settings.Ble = ble;
 
         if (setup || string.IsNullOrWhiteSpace(settings.Passphrase))
@@ -127,6 +130,7 @@ internal static class Program
         catch (Exception ex)
         {
             Host.CursorHider.Restore();
+            Mirror.WindowHider.Unhide();
             Log.Error("fatal: " + ex);
             MessageBox.Show(ex.ToString(), "Glissando crashed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 2;

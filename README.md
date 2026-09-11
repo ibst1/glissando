@@ -118,6 +118,16 @@ back to the source window; the source PC brings that window to the front and
 replays the input there, so nothing needs a keyboard at that end. Pick the tray
 item again to stop.
 
+While it is mirrored, the window is invisible on the PC it lives on, as if it
+had moved over (an option, on by default). It keeps its taskbar button and
+Alt+Tab entry, and it shows again when the mirror stops or the moment someone
+clicks or types on that PC, so an invisible window can never sit in front of
+a person swallowing their clicks. The trick is a layered window at 1/255
+opacity: the only way of hiding a window that still lets it take clicks and
+keys and become the foreground window, which the input replay needs (moving
+it off screen or DWM-cloaking it would break that). If Glissando is ever
+killed with a window hidden, the next start makes it visible again.
+
 The picture is sent as small JPEG tiles, only the ones that changed, so a still
 window costs almost nothing and typing shows at once. Each frame is capped in
 bytes -- tight when this PC is the BLE peripheral, whose direction is the slower

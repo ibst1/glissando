@@ -69,11 +69,14 @@ public sealed class Session : IDisposable
     /// <summary>True while this PC is mirroring one of its windows to the other PC.</summary>
     public bool Mirroring => _mirrorSender != null;
 
+    /// <summary>True while the mirrored window is invisible on this PC.</summary>
+    public bool MirrorHidden => _mirrorSender?.Hidden ?? false;
+
     /// <summary>Start mirroring the given window to the peer (replaces any current one).</summary>
     public void StartMirror(IntPtr hwnd)
     {
         StopMirror();
-        _mirrorSender = new Mirror.MirrorSender(hwnd, Enqueue, () => Volatile.Read(ref _queued), slowLink: !_channel.IsCentral);
+        _mirrorSender = new Mirror.MirrorSender(hwnd, Enqueue, () => Volatile.Read(ref _queued), slowLink: !_channel.IsCentral, hide: _s.HideMirroredWindow);
         _mirrorSender.Start();
         Log.Info($"mirror: started for window {hwnd:X}");
         StateChanged?.Invoke();
@@ -236,6 +239,9 @@ public sealed class Session : IDisposable
             Log.Info($"local input on this PC while controlled by {PeerName}; taking control back");
             _injector.Deactivate(); // the peer stops via the ControlAlive -> Detached handshake
         };
+        // Someone is at this PC: an invisible window in front of them would swallow their clicks, so show it.
+        // The mirror goes on; only the hiding ends, until the next mirror is started.
+        _capture.LocalActivity += () => { if (_mirrorSender is { Hidden: true } m) { m.Reveal(); StateChanged?.Invoke(); } };
         _injector.InputWhileInactive += () =>
         {
             // Give a late Enter 300 ms to show up before declaring the two sides out of step.

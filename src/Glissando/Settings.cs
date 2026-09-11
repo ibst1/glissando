@@ -37,6 +37,10 @@ public sealed class Settings
     /// <summary>Swap the system cursors for blank ones while this PC controls the other; restored on return.</summary>
     public bool HideCursorWhileControlling { get; set; }
 
+    /// <summary>Make a window invisible on this PC while it is mirrored to the other one; it shows again when the
+    /// mirror stops, or as soon as someone clicks or types on this PC.</summary>
+    public bool HideMirroredWindow { get; set; } = true;
+
     /// <summary>After a few minutes without input, ping only every 10 s so the BLE link can idle (first move after that is slower).</summary>
     public bool PowerSaveWhenIdle { get; set; }
 

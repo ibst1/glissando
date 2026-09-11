@@ -201,6 +201,7 @@ internal sealed class SettingsForm : Form
     private readonly CheckBox _clip = new() { Text = "Copy clipboard text across when the cursor crosses", AutoSize = true };
     private readonly CheckBox _autostart = new() { Text = "Start Glissando with Windows", AutoSize = true };
     private readonly CheckBox _hideCursor = new() { Text = "Hide this PC's cursor while controlling the other PC (swaps the system cursors; restored on return, and on next start if Glissando is ever killed while they are hidden)", AutoSize = true, MaximumSize = new Size(480, 0) };
+    private readonly CheckBox _hideMirror = new() { Text = "Hide a window on this PC while it is mirrored to the other PC (it becomes invisible here, as if it had moved over; it shows again when the mirror stops or when you click or type on this PC)", AutoSize = true, MaximumSize = new Size(480, 0) };
     private readonly CheckBox _powerSave = new() { Text = "Save power after 5 minutes without input (the first move after a pause is then slower)", AutoSize = true, MaximumSize = new Size(480, 0) };
     private readonly ComboBox _ble = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
     private readonly Label _btInfo = new() { AutoSize = true, MaximumSize = new Size(470, 0) };
@@ -288,10 +289,12 @@ internal sealed class SettingsForm : Form
         _clip.Checked = working.SyncClipboard;
         _autostart.Checked = Settings.StartWithWindows;
         _hideCursor.Checked = working.HideCursorWhileControlling;
+        _hideMirror.Checked = working.HideMirroredWindow;
         _powerSave.Checked = working.PowerSaveWhenIdle;
         layout.Controls.Add(_capture);
         layout.Controls.Add(_clip);
         layout.Controls.Add(_hideCursor);
+        layout.Controls.Add(_hideMirror);
         layout.Controls.Add(_powerSave);
         layout.Controls.Add(_autostart);
 
@@ -390,6 +393,7 @@ internal sealed class SettingsForm : Form
         _s.CaptureEnabled = _capture.Checked;
         _s.SyncClipboard = _clip.Checked;
         _s.HideCursorWhileControlling = _hideCursor.Checked;
+        _s.HideMirroredWindow = _hideMirror.Checked;
         _s.PowerSaveWhenIdle = _powerSave.Checked;
         Settings.StartWithWindows = _autostart.Checked;
         Saved?.Invoke(_s);

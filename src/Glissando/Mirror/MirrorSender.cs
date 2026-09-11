@@ -31,23 +31,38 @@ internal sealed class MirrorSender
     private readonly Action<Frame> _send;
     private readonly Func<int> _queueDepth;
     private readonly bool _slowLink;
+    private readonly bool _hide;
     private readonly MirrorTarget _target;
     private CancellationTokenSource? _cts;
 
-    public MirrorSender(IntPtr hwnd, Action<Frame> send, Func<int> queueDepth, bool slowLink)
+    public MirrorSender(IntPtr hwnd, Action<Frame> send, Func<int> queueDepth, bool slowLink, bool hide)
     {
         _hwnd = hwnd;
         _send = send;
         _queueDepth = queueDepth;
         _slowLink = slowLink;
+        _hide = hide;
         _target = new MirrorTarget(hwnd);
     }
 
     /// <summary>The viewer interacting with the mirror: apply it to the source window.</summary>
     public void Input(Frame f) => _target.Apply(f);
 
+    /// <summary>True while the source window is invisible on this PC (see WindowHider).</summary>
+    public bool Hidden => WindowHider.IsHidden(_hwnd);
+
+    /// <summary>Someone clicked or typed on this PC: show the window here again, and keep mirroring it. An
+    /// invisible foreground window would otherwise swallow their clicks.</summary>
+    public void Reveal()
+    {
+        if (!Hidden) return;
+        Log.Info("mirror: local input on this PC; showing the mirrored window here again");
+        WindowHider.Unhide();
+    }
+
     public void Start()
     {
+        if (_hide) WindowHider.Hide(_hwnd);
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
         new Thread(() => Loop(ct)) { IsBackground = true, Name = "mirror-capture" }.Start();
@@ -57,6 +72,7 @@ internal sealed class MirrorSender
     {
         _cts?.Cancel();
         _target.ReleaseAll();
+        WindowHider.Unhide();
         try { _send(Frame.MirrorEnd()); } catch { }
     }
 
@@ -69,20 +85,26 @@ internal sealed class MirrorSender
         var logClock = Stopwatch.StartNew();
         var refreshClock = Stopwatch.StartNew();
         int txTiles = 0, txChunks = 0, txBytes = 0;
-        bool lastFromScreen = false, modeLogged = false;
+        string lastMode = "";
 
         while (!ct.IsCancellationRequested)
         {
             int t0 = Environment.TickCount;
             try
             {
-                using var bmp = WindowCapture.Capture(_hwnd, out bool fromScreen);
-                if (bmp == null) { Log.Info("mirror: source window gone"); break; }
-                if (fromScreen != lastFromScreen || !modeLogged)
+                bool hidden = Hidden;
+                using var bmp = WindowCapture.Capture(_hwnd, hidden, out bool fromScreen);
+                if (bmp == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(); break; }
+                string mode = hidden ? "hidden" : fromScreen ? "screen" : "print";
+                if (mode != lastMode)
                 {
-                    modeLogged = true; lastFromScreen = fromScreen;
-                    Log.Info(fromScreen ? "mirror tx: capturing from the screen (window in front; popups show)"
-                                        : $"mirror tx: capturing via PrintWindow (window not in front; foreground is \"{WindowCapture.Title(WindowCapture.Foreground())}\")");
+                    lastMode = mode;
+                    Log.Info(mode switch
+                    {
+                        "hidden" => "mirror tx: window hidden here; capturing via PrintWindow, popups overlaid from the screen",
+                        "screen" => "mirror tx: capturing from the screen (window in front; popups show)",
+                        _ => $"mirror tx: capturing via PrintWindow (window not in front; foreground is \"{WindowCapture.Title(WindowCapture.Foreground())}\")",
+                    });
                 }
                 int w = bmp.Width, h = bmp.Height;
 

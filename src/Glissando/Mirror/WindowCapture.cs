@@ -7,8 +7,9 @@ namespace Glissando.Mirror;
 
 /// <summary>
 /// Captures a window's pixels with PrintWindow (GDI, no Direct3D), for the window-mirroring feature.
-/// PrintWindow asks the window to paint itself on demand, so it works even when the window is off-screen or
-/// DWM-cloaked -- which is how the source window will be hidden from its own screen while still being mirrored.
+/// PrintWindow asks the window to paint itself on demand, so it works even when the window is behind others or
+/// made invisible with layered alpha -- which is how WindowHider hides the source window from its own screen
+/// while it is mirrored.
 /// The trade-off: heavily GPU-rendered windows (video, some browsers) may come back partly blank. Fine for the
 /// documents and dashboards this feature targets.
 /// </summary>
@@ -64,9 +65,12 @@ internal static class WindowCapture
     /// viewer is interacting with it -- the picture is taken from the screen inside its rectangle instead,
     /// popups included (CAPTUREBLT for the layered ones Office uses). Otherwise PrintWindow, which also works
     /// for a window behind others or off screen, and never shows whatever happens to cover it.</summary>
-    public static Bitmap? Capture(IntPtr hwnd) => Capture(hwnd, out _);
+    public static Bitmap? Capture(IntPtr hwnd) => Capture(hwnd, hidden: false, out _);
 
-    public static Bitmap? Capture(IntPtr hwnd, out bool fromScreen)
+    /// <param name="hidden">The window is invisible on this screen (WindowHider): the screen inside its rectangle
+    /// shows what lies behind it, so it is always drawn with PrintWindow; its popups are opaque windows of their
+    /// own and still show on the screen, so those are copied from the screen on top.</param>
+    public static Bitmap? Capture(IntPtr hwnd, bool hidden, out bool fromScreen)
     {
         fromScreen = false;
         if (!IsWindow(hwnd) || !GetWindowRect(hwnd, out var r)) return null;
@@ -79,19 +83,58 @@ internal static class WindowCapture
             try
             {
                 bool done = false;
-                if (InFront(hwnd))
+                if (!hidden && InFront(hwnd))
                 {
                     IntPtr screen = GetDC(IntPtr.Zero);
                     try { done = BitBlt(hdc, 0, 0, w, h, screen, r.Left, r.Top, SRCCOPY | CAPTUREBLT); }
                     finally { ReleaseDC(IntPtr.Zero, screen); }
                 }
                 fromScreen = done;
-                if (!done) PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
+                if (!done)
+                {
+                    PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
+                    if (hidden) OverlayPopups(hwnd, hdc, r);
+                }
             }
             finally { g.ReleaseHdc(hdc); }
         }
         return bmp;
     }
+
+    private const int GWL_STYLE = -16;
+    private const long WS_POPUP = 0x80000000;
+
+    /// <summary>Copy the process's visible popup windows (menus, drop-downs, tooltips, dialogs: WS_POPUP, above
+    /// their owner) that overlap the window rectangle from the screen onto the capture, bottom-most first so the
+    /// z-order holds. Only the part inside the window rectangle, which is all the capture covers.</summary>
+    private static void OverlayPopups(IntPtr hwnd, IntPtr hdc, RECT r)
+    {
+        uint pid = ProcessId(hwnd);
+        var popups = new List<RECT>();
+        EnumWindows((h, _) =>
+        {
+            if (h == hwnd || !IsWindowVisible(h) || ProcessId(h) != pid) return true;
+            if ((GetWindowLongPtr(h, GWL_STYLE).ToInt64() & WS_POPUP) == 0) return true;
+            if (!GetWindowRect(h, out var p)) return true;
+            int left = Math.Max(p.Left, r.Left), top = Math.Max(p.Top, r.Top);
+            int right = Math.Min(p.Right, r.Right), bottom = Math.Min(p.Bottom, r.Bottom);
+            if (right > left && bottom > top) popups.Add(new RECT { Left = left, Top = top, Right = right, Bottom = bottom });
+            return true;
+        }, IntPtr.Zero);
+        if (popups.Count == 0) return;
+        IntPtr screen = GetDC(IntPtr.Zero);
+        try
+        {
+            for (int i = popups.Count - 1; i >= 0; i--) // EnumWindows lists top-most first
+            {
+                var p = popups[i];
+                BitBlt(hdc, p.Left - r.Left, p.Top - r.Top, p.Right - p.Left, p.Bottom - p.Top, screen, p.Left, p.Top, SRCCOPY | CAPTUREBLT);
+            }
+        }
+        finally { ReleaseDC(IntPtr.Zero, screen); }
+    }
+
+    [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
 
     private static ImageCodecInfo? _jpeg;
 

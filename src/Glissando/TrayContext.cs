@@ -161,7 +161,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             }
             string title = Mirror.WindowCapture.Title(_lastRealWindow);
             _session.StartMirror(_lastRealWindow);
-            _tray.ShowBalloonTip(3000, "Glissando", $"Mirroring \"{title}\" to the other PC.", ToolTipIcon.Info);
+            _tray.ShowBalloonTip(4000, "Glissando", _session.MirrorHidden
+                ? $"Mirroring \"{title}\" to the other PC. It is invisible here until the mirror stops, or until you click or type on this PC."
+                : $"Mirroring \"{title}\" to the other PC.", ToolTipIcon.Info);
         }
         UpdateTray();
     }
