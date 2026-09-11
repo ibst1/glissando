@@ -14,6 +14,9 @@ internal sealed class MirrorReceiver
     private MirrorWindow? _window;
     private int _srcW, _srcH;
 
+    /// <summary>Where the mirror window's interactions go (the session sends them to the source PC).</summary>
+    public Action<Frame>? Send { get; set; }
+
     private ushort _frameId;
     private int _count, _have;
     private Rectangle _region;
@@ -102,6 +105,7 @@ internal sealed class MirrorReceiver
         if (_window == null || _window.IsDisposed)
         {
             _window = new MirrorWindow();
+            _window.Input = f => Send?.Invoke(f);
             _window.FormClosed += (_, _) => { _window = null; Reset(); };
         }
         return _window;

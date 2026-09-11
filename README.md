@@ -108,6 +108,25 @@ Glissando.exe --ble connect --console pin the Bluetooth role, show the log
   need raw touchpad-HID parsing and two-finger gesture detection on the
   controlling side).
 
+## Mirroring a window
+
+Sometimes you do not want to move over to the other PC, only to see and use one
+window that lives there -- a build running, a chat, a document. Click the window
+you want, then pick **Mirror the active window** from the tray: it opens on this
+PC as a plain top-most window. Click, type and scroll in it and the input goes
+back to the source window; the source PC brings that window to the front and
+replays the input there, so nothing needs a keyboard at that end. Pick the tray
+item again to stop.
+
+The picture is sent as small JPEG tiles, only the ones that changed, so a still
+window costs almost nothing and typing shows at once. Each frame is capped in
+bytes -- tight when this PC is the BLE peripheral, whose direction is the slower
+one -- so a big repaint (a scroll, a browser redraw) is spread over a few frames
+rather than dumped in one burst that would stall the link and the input with it;
+the window then takes about a second to finish redrawing a large change instead
+of freezing. Menus, drop-downs and dialogs show too, because while the source
+window is in front its picture is taken from the screen rather than from the
+window alone. The tiles ride the same AES-GCM channel as all other frames.
 ## Security
 
 Every frame is AES-256-GCM encrypted with a key derived from the passphrase

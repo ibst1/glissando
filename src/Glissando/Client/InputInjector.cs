@@ -148,7 +148,7 @@ public sealed class InputInjector
     /// character translation; a held modifier is kept effective for every key by the re-assertion above.
     /// Fall back to the scancode only for a key that has no virtual-key code.
     /// </summary>
-    private static void SendKey(ushort vk, ushort scan, bool up, bool ext)
+    internal static void SendKey(ushort vk, ushort scan, bool up, bool ext)
     {
         uint flags = up ? Native.KEYEVENTF_KEYUP : 0;
         if (ext) flags |= Native.KEYEVENTF_EXTENDEDKEY;

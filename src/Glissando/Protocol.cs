@@ -26,6 +26,9 @@ public enum FrameType : byte
     MirrorBegin = 18, // window mirroring starts/resizes: srcW(u16) srcH(u16)
     MirrorChunk = 19, // frameId(u16) index(u16) count(u16) x(u16) y(u16) w(u16) h(u16) keyframe(1) + JPEG chunk
     MirrorEnd = 20,   // mirroring stopped; the receiver hides its window
+    MirrorPointer = 21, // x(u16) y(u16): the viewer's pointer over the mirror, in source-window pixels (best effort)
+    MirrorMouse = 22,   // kind(1: 1=down 2=up 3=wheel 4=hwheel) x(u16) y(u16) button(1) delta(i16): a click or wheel on the mirror
+    MirrorKey = 23,     // vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key typed into the mirror
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -192,6 +195,35 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     }
 
     public static Frame MirrorEnd() => new(FrameType.MirrorEnd, []);
+
+    // ---- interacting with a mirror (viewer -> source) ----
+    public static Frame MirrorPointer(int x, int y)
+    {
+        var p = new byte[4];
+        BinaryPrimitives.WriteUInt16LittleEndian(p, (ushort)Math.Clamp(x, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), (ushort)Math.Clamp(y, 0, 65535));
+        return new(FrameType.MirrorPointer, p);
+    }
+
+    public static Frame MirrorMouse(byte kind, int x, int y, byte button, int delta)
+    {
+        var p = new byte[8];
+        p[0] = kind;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(1), (ushort)Math.Clamp(x, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(3), (ushort)Math.Clamp(y, 0, 65535));
+        p[5] = button;
+        BinaryPrimitives.WriteInt16LittleEndian(p.AsSpan(6), (short)Math.Clamp(delta, short.MinValue, short.MaxValue));
+        return new(FrameType.MirrorMouse, p);
+    }
+
+    public static Frame MirrorKey(ushort vk, ushort scan, bool up, bool extended)
+    {
+        var p = new byte[5];
+        BinaryPrimitives.WriteUInt16LittleEndian(p, vk);
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), scan);
+        p[4] = (byte)((up ? 1 : 0) | (extended ? 2 : 0));
+        return new(FrameType.MirrorKey, p);
+    }
 
     public static IEnumerable<Frame> ClipboardText(byte id, string text)
     {

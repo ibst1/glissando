@@ -73,11 +73,14 @@ public sealed class Session : IDisposable
     public void StartMirror(IntPtr hwnd)
     {
         StopMirror();
-        _mirrorSender = new Mirror.MirrorSender(hwnd, Enqueue, () => Volatile.Read(ref _queued));
+        _mirrorSender = new Mirror.MirrorSender(hwnd, Enqueue, () => Volatile.Read(ref _queued), slowLink: !_channel.IsCentral);
         _mirrorSender.Start();
         Log.Info($"mirror: started for window {hwnd:X}");
         StateChanged?.Invoke();
     }
+
+    /// <summary>Viewer side: an interaction with the mirror (pointer, click, wheel, key) for the source PC.</summary>
+    public void SendMirrorInput(Frame f) { if (Authenticated) Send(f); }
 
     public void StopMirror()
     {
@@ -464,6 +467,13 @@ public sealed class Session : IDisposable
                 _injector.Apply(f);
                 break;
 
+            case FrameType.MirrorPointer:
+            case FrameType.MirrorMouse:
+            case FrameType.MirrorKey:
+                // The viewer interacting with the window we mirror: apply it to that window here.
+                if (Authenticated) _mirrorSender?.Input(f);
+                break;
+
             case FrameType.MirrorBegin:
             case FrameType.MirrorChunk:
             case FrameType.MirrorEnd:
@@ -528,7 +538,8 @@ public sealed class Session : IDisposable
     private readonly HashSet<ushort> _dedupSeen = [];
 
     private static bool IsReliableType(FrameType t) => t is FrameType.Key or FrameType.MouseButton
-        or FrameType.Enter or FrameType.Leave or FrameType.ReturnEdge or FrameType.Detached or FrameType.Status;
+        or FrameType.Enter or FrameType.Leave or FrameType.ReturnEdge or FrameType.Detached or FrameType.Status
+        or FrameType.MirrorMouse or FrameType.MirrorKey;   // a click or key into a mirror must land; pointer moves may not
 
     /// <summary>Send a frame; the ones that must not be lost go several times with a dedup id appended.</summary>
     private void Send(Frame f)
@@ -567,6 +578,7 @@ public sealed class Session : IDisposable
     {
         // Drop mouse moves rather than let a stalled link build a long queue.
         if (f.Type == FrameType.MouseMove && Volatile.Read(ref _queued) > 64) return;
+        if (f.Type == FrameType.MirrorPointer && Volatile.Read(ref _queued) > 64) return;
         // Mirror chunks are bulky and best-effort: drop them under a backlog so keyboard and mouse, which the
         // link must deliver promptly, never queue behind a window frame. The next keyframe repaints the gap.
         if (f.Type == FrameType.MirrorChunk && Volatile.Read(ref _queued) > 200) return;

@@ -16,20 +16,35 @@ internal sealed class MirrorSender
     private const long Quality = 45;        // documents stay readable; fewer bytes per tile = less link backlog
     private const int Tile = 128;
     private const int ChunkData = 400;
-    private const int RefreshEveryMs = 200; // heal a single stale tile this often -- a trickle, not a stream
+    private const int RefreshEveryMs = 250; // after the first pass: heal one stale tile this often at most, and only on an idle link
     private const int PaceBelow = 40;       // keep the send queue short so a tile shows soon after it changes
+
+    // Cap the JPEG bytes sent per frame; a bigger change (a scroll, an Edge repaint) is split across frames
+    // instead of dumped in one burst that saturates the link and freezes the viewer. The cap is tight when
+    // this PC is the BLE peripheral, whose notify direction is the slow one -- 283 kB in a 2 s window there
+    // stalled both the picture and the viewer's clicks (2026-09-12). At 12 fps the fast budget is ~180 kB/s,
+    // the slow one ~34 kB/s. A change never lost: an unsent dirty tile is kept dirty (below) for a later frame.
+    private const int SlowFrameBytes = 2800;
+    private const int FastFrameBytes = 15000;
 
     private readonly IntPtr _hwnd;
     private readonly Action<Frame> _send;
     private readonly Func<int> _queueDepth;
+    private readonly bool _slowLink;
+    private readonly MirrorTarget _target;
     private CancellationTokenSource? _cts;
 
-    public MirrorSender(IntPtr hwnd, Action<Frame> send, Func<int> queueDepth)
+    public MirrorSender(IntPtr hwnd, Action<Frame> send, Func<int> queueDepth, bool slowLink)
     {
         _hwnd = hwnd;
         _send = send;
         _queueDepth = queueDepth;
+        _slowLink = slowLink;
+        _target = new MirrorTarget(hwnd);
     }
+
+    /// <summary>The viewer interacting with the mirror: apply it to the source window.</summary>
+    public void Input(Frame f) => _target.Apply(f);
 
     public void Start()
     {
@@ -41,6 +56,7 @@ internal sealed class MirrorSender
     public void Stop()
     {
         _cts?.Cancel();
+        _target.ReleaseAll();
         try { _send(Frame.MirrorEnd()); } catch { }
     }
 
@@ -53,20 +69,27 @@ internal sealed class MirrorSender
         var logClock = Stopwatch.StartNew();
         var refreshClock = Stopwatch.StartNew();
         int txTiles = 0, txChunks = 0, txBytes = 0;
+        bool lastFromScreen = false, modeLogged = false;
 
         while (!ct.IsCancellationRequested)
         {
             int t0 = Environment.TickCount;
             try
             {
-                using var bmp = WindowCapture.Capture(_hwnd);
+                using var bmp = WindowCapture.Capture(_hwnd, out bool fromScreen);
                 if (bmp == null) { Log.Info("mirror: source window gone"); break; }
+                if (fromScreen != lastFromScreen || !modeLogged)
+                {
+                    modeLogged = true; lastFromScreen = fromScreen;
+                    Log.Info(fromScreen ? "mirror tx: capturing from the screen (window in front; popups show)"
+                                        : $"mirror tx: capturing via PrintWindow (window not in front; foreground is \"{WindowCapture.Title(WindowCapture.Foreground())}\")");
+                }
                 int w = bmp.Width, h = bmp.Height;
 
                 if (w != lastW || h != lastH)
                 {
                     for (int i = 0; i < 3; i++) _send(Frame.MirrorBegin(w, h)); // redundant: the size must arrive
-                    lastW = w; lastH = h; prev = null;
+                    lastW = w; lastH = h; prev = null; refreshCursor = 0;       // a fresh heal pass for the new size
                     Log.Info($"mirror tx: begin {w}x{h}");
                 }
 
@@ -77,7 +100,7 @@ internal sealed class MirrorSender
                 int tilesX = (w + Tile - 1) / Tile, tilesY = (h + Tile - 1) / Tile, tileCount = tilesX * tilesY;
                 var sent = new bool[tileCount];
 
-                void SendIndex(int idx, bool full)
+                int SendIndex(int idx, bool full)
                 {
                     int col = idx % tilesX, row = idx / tilesX;
                     int tx = col * Tile, ty = row * Tile;
@@ -89,21 +112,37 @@ internal sealed class MirrorSender
                     sent[idx] = true;
                     txTiles++; txBytes += jpeg.Length;
                     txChunks += Math.Max(1, (jpeg.Length + ChunkData - 1) / ChunkData);
+                    return jpeg.Length;
                 }
 
+                int budget = _slowLink ? SlowFrameBytes : FastFrameBytes;
+                int spentBytes = 0;
                 for (int idx = 0; idx < tileCount && !ct.IsCancellationRequested; idx++)
                 {
                     int col = idx % tilesX, row = idx / tilesX;
                     int tx = col * Tile, ty = row * Tile;
                     int tw = Math.Min(Tile, w - tx), th = Math.Min(Tile, h - ty);
-                    if (first || !WindowCapture.TileEqual(prev!, cur, stride, tx, ty, tx + tw, ty + th))
-                        SendIndex(idx, first);
+                    if (!(first || !WindowCapture.TileEqual(prev!, cur, stride, tx, ty, tx + tw, ty + th)))
+                        continue;
+                    // The first frame (start or resize) has no prior to defer against, so it goes whole; after
+                    // that, once the frame's byte budget is spent the rest of a big change waits. An unsent
+                    // dirty tile must not be forgotten: revert it in cur to the old pixels so it still differs
+                    // next frame and is picked up then (a few frames to fully redraw a scroll, never a freeze).
+                    if (first || spentBytes < budget)
+                        spentBytes += SendIndex(idx, first);
+                    else
+                        WindowCapture.CopyTile(prev!, cur, stride, tx, ty, tx + tw, ty + th);
                 }
 
-                // Heal a single stale tile now and then, a trickle in the background; the whole window comes
-                // round over tileCount * RefreshEveryMs. Skipped while the user is actively changing tiles, so
-                // typing owns the whole link.
-                if (!first && sent.Count(b => b) == 0 && refreshClock.ElapsedMilliseconds >= RefreshEveryMs)
+                // Heal stale tiles in the background, paced by the LINK rather than a clock: a heal tile goes
+                // only when nothing changed this frame AND the send queue is empty, so it never takes capacity
+                // from edits or from the viewer's input. The first pass after (re)start runs as fast as the
+                // queue drains -- that is what fills the tiles the opening burst lost -- later passes at most
+                // every RefreshEveryMs. A fixed 60 ms trickle at 12 fps was 12 tiles/s, ~40 kB/s of constant
+                // load, which saturated the slow BLE direction (peripheral -> central) even with nothing to show.
+                bool healing = refreshCursor < tileCount;
+                if (!first && sent.Count(b => b) == 0 && _queueDepth() == 0
+                    && (healing || refreshClock.ElapsedMilliseconds >= RefreshEveryMs))
                 {
                     int idx = refreshCursor++ % tileCount;
                     SendIndex(idx, true);

@@ -17,6 +17,10 @@ internal static class WindowCapture
     private const uint PW_RENDERFULLCONTENT = 0x00000002;
 
     [DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+    [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+    [DllImport("gdi32.dll")] private static extern bool BitBlt(IntPtr hdcDest, int x, int y, int w, int h, IntPtr hdcSrc, int sx, int sy, uint rop);
+    private const uint SRCCOPY = 0x00CC0020, CAPTUREBLT = 0x40000000;
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
@@ -45,15 +49,45 @@ internal static class WindowCapture
         return w > 0 && h > 0 ? new Size(w, h) : null;
     }
 
-    /// <summary>Capture the window to a 32bpp bitmap, or null if it has no area or is gone.</summary>
-    public static Bitmap? Capture(IntPtr hwnd)
+    /// <summary>True when the screen shows this window in front: it is the foreground window, or the foreground
+    /// window belongs to the same process -- a context menu, drop-down, mini toolbar or dialog of it. Office's
+    /// popups take activation, so while one is open the foreground window is the popup, not the app.</summary>
+    public static bool InFront(IntPtr hwnd)
     {
-        if (SizeOf(hwnd) is not Size s) return null;
-        var bmp = new Bitmap(s.Width, s.Height, PixelFormat.Format32bppArgb);
+        IntPtr fg = GetForegroundWindow();
+        return fg == hwnd || (fg != IntPtr.Zero && ProcessId(fg) == ProcessId(hwnd));
+    }
+
+    /// <summary>Capture the window to a 32bpp bitmap, or null if it has no area or is gone.
+    /// Menus, drop-downs, tooltips and dialogs are top-level windows of their own, which PrintWindow of the
+    /// main window never shows. So while the window is in front (see InFront) -- always the case when the
+    /// viewer is interacting with it -- the picture is taken from the screen inside its rectangle instead,
+    /// popups included (CAPTUREBLT for the layered ones Office uses). Otherwise PrintWindow, which also works
+    /// for a window behind others or off screen, and never shows whatever happens to cover it.</summary>
+    public static Bitmap? Capture(IntPtr hwnd) => Capture(hwnd, out _);
+
+    public static Bitmap? Capture(IntPtr hwnd, out bool fromScreen)
+    {
+        fromScreen = false;
+        if (!IsWindow(hwnd) || !GetWindowRect(hwnd, out var r)) return null;
+        int w = r.Right - r.Left, h = r.Bottom - r.Top;
+        if (w <= 0 || h <= 0) return null;
+        var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(bmp))
         {
             IntPtr hdc = g.GetHdc();
-            try { PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT); }
+            try
+            {
+                bool done = false;
+                if (InFront(hwnd))
+                {
+                    IntPtr screen = GetDC(IntPtr.Zero);
+                    try { done = BitBlt(hdc, 0, 0, w, h, screen, r.Left, r.Top, SRCCOPY | CAPTUREBLT); }
+                    finally { ReleaseDC(IntPtr.Zero, screen); }
+                }
+                fromScreen = done;
+                if (!done) PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
+            }
             finally { g.ReleaseHdc(hdc); }
         }
         return bmp;
@@ -98,6 +132,12 @@ internal static class WindowCapture
             }
         }
         return maxX < 0 ? null : new Rectangle(minX, minY, maxX - minX, maxY - minY);
+    }
+
+    public static void CopyTile(byte[] src, byte[] dst, int stride, int x0, int y0, int x1, int y1)
+    {
+        int bytes = (x1 - x0) * 4;
+        for (int y = y0; y < y1; y++) Array.Copy(src, y * stride + x0 * 4, dst, y * stride + x0 * 4, bytes);
     }
 
     public static bool TileEqual(byte[] a, byte[] b, int stride, int x0, int y0, int x1, int y1)

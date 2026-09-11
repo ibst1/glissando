@@ -35,6 +35,14 @@ Write-Host "Building Glissando $info ($buildTime)"
 $selfContained = if ($FrameworkDependent) { "false" } else { "true" }
 # No IncludeNativeLibrariesForSelfExtract: we ship no native libraries of our own, and with it the
 # first start of every new build spent ~30 s extracting the runtime to a cache.
+# A running Glissando locks its exe, and publish then fails. A running exe may still be RENAMED, so move it
+# aside first; the instance keeps running from the renamed file and the next start picks up the new one.
+$exe = Join-Path $target "Glissando.exe"
+if (Test-Path $exe) {
+    $prev = Join-Path $target "Glissando.prev.exe"
+    Remove-Item $prev -Force -ErrorAction SilentlyContinue
+    try { Move-Item $exe $prev -Force } catch { Write-Host "note: could not move the old exe aside ($_)" }
+}
 & $dotnet publish $proj -c $Configuration -r $Runtime --self-contained $selfContained `
     -p:PublishSingleFile=true -p:Version=$version -p:InformationalVersion=$info -p:BuildTime="$buildTime" -o $target
 if ($LASTEXITCODE -ne 0) { throw "publish failed" }
