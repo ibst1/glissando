@@ -86,6 +86,7 @@ internal sealed class MirrorSender
         var refreshClock = Stopwatch.StartNew();
         int txTiles = 0, txChunks = 0, txBytes = 0;
         string lastMode = "";
+        int tileEstimate = 2000;   // running average of an encoded tile, seeds the per-frame budget check
 
         while (!ct.IsCancellationRequested)
         {
@@ -150,8 +151,15 @@ internal sealed class MirrorSender
                     // that, once the frame's byte budget is spent the rest of a big change waits. An unsent
                     // dirty tile must not be forgotten: revert it in cur to the old pixels so it still differs
                     // next frame and is picked up then (a few frames to fully redraw a scroll, never a freeze).
-                    if (first || spentBytes < budget)
-                        spentBytes += SendIndex(idx, first);
+                    // Budget is checked with the expected size of the NEXT tile, not after the fact: testing
+                    // spentBytes < budget alone let every frame overshoot by one tile, twelve times a second,
+                    // which showed as 90-100 kB per 2 s against a 67 kB budget (2026-09-12).
+                    if (first || spentBytes + tileEstimate <= budget)
+                    {
+                        int n = SendIndex(idx, first);
+                        spentBytes += n;
+                        tileEstimate = (tileEstimate * 3 + n) / 4;
+                    }
                     else
                         WindowCapture.CopyTile(prev!, cur, stride, tx, ty, tx + tw, ty + th);
                 }

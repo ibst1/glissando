@@ -7,9 +7,10 @@ namespace Glissando.Mirror;
 /// window. Everything goes through SendInput, the one path every application honours -- posting WM_* messages
 /// to a background window loses the modifier state and is ignored by half the programs out there -- which
 /// means the window must be on screen and in front when the input lands. So it is restored and brought forward
-/// before a click or key, which Glissando may do because its own SendInput counts as the last input on this
-/// PC. The source screen shows the window while that happens; nobody is sitting at it, the user is at the
-/// viewer. Pointer moves alone never raise the window, they only place the cursor, so hover works once it is up.
+/// before a click or key (see Raise: Windows will not hand a background process the foreground for the asking,
+/// so it attaches to the foreground thread's input queue first). The source screen shows the window while that
+/// happens; nobody is sitting at it, the user is at the viewer. Pointer moves alone never raise the window,
+/// they only place the cursor, so hover works once it is up.
 /// </summary>
 internal sealed class MirrorTarget
 {
@@ -53,11 +54,36 @@ internal sealed class MirrorTarget
     private void Raise()
     {
         if (IsIconic(_hwnd)) ShowWindow(_hwnd, SW_RESTORE);
-        if (GetForegroundWindow() == _hwnd) return;
-        // A process may set the foreground window only if it produced the last input; a no-op SendInput
-        // makes that true, the same fact the injector relies on for its cursor placement.
-        Native.Send(Native.Mouse(Native.MOUSEEVENTF_MOVE, 0, 0));
-        SetForegroundWindow(_hwnd);
+        IntPtr fg = GetForegroundWindow();
+        if (fg == _hwnd) return;
+        // Windows refuses a background process the foreground: SetForegroundWindow from here merely flashed
+        // the taskbar, the window stayed buried behind whatever was in front on this PC, and the viewer's
+        // clicks landed on THAT window while its picture never changed -- the "frozen mirror" (2026-09-12).
+        // The permitted way round: attach to the input queue of the thread that currently owns the
+        // foreground, which lets the switch through, and drop the foreground-lock timeout for the moment.
+        // Nobody sits at this PC while it is being driven through the mirror, so stealing focus is the
+        // intent, not a side effect.
+        // The attachment that counts is OUR calling thread's: joined to the queue that owns the foreground,
+        // our SetForegroundWindow is treated as coming from the foreground itself. (Attaching the foreground
+        // thread to the target's, two foreign queues, was the first attempt and failed on every click.)
+        uint me = GetCurrentThreadId();
+        uint fgThread = fg != IntPtr.Zero ? GetWindowThreadProcessId(fg, out _) : 0;
+        uint target = GetWindowThreadProcessId(_hwnd, out _);
+        SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, IntPtr.Zero, 0);
+        bool toFg = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
+        bool toTarget = target != 0 && target != me && target != fgThread && AttachThreadInput(me, target, true);
+        try
+        {
+            BringWindowToTop(_hwnd);
+            SetForegroundWindow(_hwnd);
+        }
+        finally
+        {
+            if (toTarget) AttachThreadInput(me, target, false);
+            if (toFg) AttachThreadInput(me, fgThread, false);
+        }
+        if (GetForegroundWindow() != _hwnd)
+            Log.Warn($"mirror: could not bring the source window to the front (foreground stays \"{WindowCapture.Title(GetForegroundWindow())}\")");
     }
 
     private void Mouse(byte kind, int x, int y, byte button, int delta)
@@ -128,4 +154,10 @@ internal sealed class MirrorTarget
     [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll")] private static extern bool SystemParametersInfo(uint action, uint param, IntPtr vparam, uint winIni);
+    private const uint SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001;
 }
