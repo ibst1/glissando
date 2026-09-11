@@ -59,7 +59,32 @@ public sealed class Session : IDisposable
     private readonly InputCapture _capture;
     private readonly InputInjector _injector;
     private readonly IClipboardAccess _clipboard;
+    private Mirror.MirrorSender? _mirrorSender;
     private Crypto? _crypto;
+
+    /// <summary>Raised on the receive thread with each incoming window-mirroring frame; the tray marshals it to
+    /// the UI thread and into a MirrorReceiver.</summary>
+    public event Action<Frame>? MirrorReceived;
+
+    /// <summary>True while this PC is mirroring one of its windows to the other PC.</summary>
+    public bool Mirroring => _mirrorSender != null;
+
+    /// <summary>Start mirroring the given window to the peer (replaces any current one).</summary>
+    public void StartMirror(IntPtr hwnd)
+    {
+        StopMirror();
+        _mirrorSender = new Mirror.MirrorSender(hwnd, Enqueue, () => Volatile.Read(ref _queued));
+        _mirrorSender.Start();
+        Log.Info($"mirror: started for window {hwnd:X}");
+        StateChanged?.Invoke();
+    }
+
+    public void StopMirror()
+    {
+        var s = _mirrorSender;
+        _mirrorSender = null;
+        if (s != null) { s.Stop(); Log.Info("mirror: stopped"); StateChanged?.Invoke(); }
+    }
     private readonly Channel<Frame> _queue = Channel.CreateUnbounded<Frame>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _cts = new();
     private readonly byte[] _myNonce = new byte[16];
@@ -162,8 +187,21 @@ public sealed class Session : IDisposable
         Log.Info("system resumed; re-establishing the link");
         SetAuthenticated(false);
         RttMs = 0;
-        _channel.Reconnect();
         StateChanged?.Invoke();
+        _ = ResumeRecoveryAsync();
+    }
+
+    /// <summary>The Bluetooth radio can take several seconds to be usable after wake, and the peer is waking
+    /// too, so a single reconnect races the radio and the two never find each other. Nudge the link every few
+    /// seconds for about half a minute, until it is back.</summary>
+    private async Task ResumeRecoveryAsync()
+    {
+        for (int i = 0; i < 12; i++)
+        {
+            if (_cts.IsCancellationRequested || (Linked && Authenticated)) return;
+            _channel.Reconnect();
+            try { await Task.Delay(3000, _cts.Token); } catch (OperationCanceledException) { return; }
+        }
     }
 
     public void Start()
@@ -426,6 +464,12 @@ public sealed class Session : IDisposable
                 _injector.Apply(f);
                 break;
 
+            case FrameType.MirrorBegin:
+            case FrameType.MirrorChunk:
+            case FrameType.MirrorEnd:
+                if (Authenticated) MirrorReceived?.Invoke(f);
+                break;
+
             default:
                 if (Authenticated) _injector.Apply(f);
                 break;
@@ -523,6 +567,9 @@ public sealed class Session : IDisposable
     {
         // Drop mouse moves rather than let a stalled link build a long queue.
         if (f.Type == FrameType.MouseMove && Volatile.Read(ref _queued) > 64) return;
+        // Mirror chunks are bulky and best-effort: drop them under a backlog so keyboard and mouse, which the
+        // link must deliver promptly, never queue behind a window frame. The next keyframe repaints the gap.
+        if (f.Type == FrameType.MirrorChunk && Volatile.Read(ref _queued) > 200) return;
         Interlocked.Increment(ref _queued);
         _queue.Writer.TryWrite(f);
     }
@@ -703,6 +750,7 @@ public sealed class Session : IDisposable
 
     public void Dispose()
     {
+        StopMirror();
         _capture.Release();
         CursorHider.Restore();
         _injector.Deactivate();

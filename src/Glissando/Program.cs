@@ -24,7 +24,8 @@ internal static class Program
     private static int Main(string[] args)
     {
         string? settingsPath = null;
-        bool console = false, setup = false;
+        bool console = false, setup = false, mirrorTest = false;
+        string? mirrorTitle = null;
         var overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         for (int i = 0; i < args.Length; i++)
@@ -42,6 +43,11 @@ internal static class Program
                     return 0;
                 case "--settings": settingsPath = Next(args, ref i); break;
                 case "--ble": overrides["ble"] = Next(args, ref i); break;
+                case "--mirror-test":
+                    // Window-mirroring increment 1: measure a window's stream cost. Optional title follows.
+                    mirrorTest = true;
+                    if (i + 1 < args.Length && !args[i + 1].StartsWith('-')) mirrorTitle = args[++i];
+                    break;
                 case "--help":
                 case "-h":
                 case "/?":
@@ -64,6 +70,21 @@ internal static class Program
 
         Native.timeBeginPeriod(1);
         ApplicationConfiguration.Initialize();
+
+        if (mirrorTest)
+        {
+            Native.AllocConsole();
+            IntPtr target = string.IsNullOrEmpty(mirrorTitle) ? Mirror.WindowCapture.Foreground() : Mirror.WindowCapture.Find(mirrorTitle);
+            if (target == IntPtr.Zero)
+            {
+                Console.WriteLine(string.IsNullOrEmpty(mirrorTitle) ? "No foreground window." : $"No window whose title contains \"{mirrorTitle}\".");
+                return 1;
+            }
+            Mirror.MirrorProbe.Run(target, seconds: 12, fps: 5, quality: 60);
+            Console.WriteLine("\nDone. Press Enter to close.");
+            Console.ReadLine();
+            return 0;
+        }
 
         // If the cursor set was swapped out while controlling the other PC, put it back no matter how we end.
         AppDomain.CurrentDomain.ProcessExit += (_, _) => Host.CursorHider.Restore();
@@ -129,6 +150,7 @@ internal static class Program
           --ble       which PC is the BLE peripheral (auto decides by itself)
           --settings  settings file (default %APPDATA%\Glissando\settings.json)
           --console   show a console window with the log
+          --mirror-test [title]  measure a window's mirroring data rate (foreground if no title)
 
         Command-line values override the settings file for this run only.
         """;

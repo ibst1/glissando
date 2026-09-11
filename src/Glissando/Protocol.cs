@@ -23,6 +23,9 @@ public enum FrameType : byte
     ControlAlive = 15, // sent periodically by the controller while remote; its absence releases the controlled PC
     Reliable = 16,   // seq(u32) + an inner encoded frame; delivered in order, retransmitted until acked
     Ack = 17,        // seq(u32): every reliable frame up to and including this has been delivered
+    MirrorBegin = 18, // window mirroring starts/resizes: srcW(u16) srcH(u16)
+    MirrorChunk = 19, // frameId(u16) index(u16) count(u16) x(u16) y(u16) w(u16) h(u16) keyframe(1) + JPEG chunk
+    MirrorEnd = 20,   // mirroring stopped; the receiver hides its window
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -158,6 +161,37 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     }
 
     public static Frame HelloAck(ReadOnlySpan<byte> peerNonce) => new(FrameType.HelloAck, peerNonce[..16].ToArray());
+
+    // ---- window mirroring ----
+    public const int MirrorChunkHeader = 15;
+
+    public static Frame MirrorBegin(int w, int h)
+    {
+        var p = new byte[4];
+        BinaryPrimitives.WriteUInt16LittleEndian(p, (ushort)Math.Clamp(w, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), (ushort)Math.Clamp(h, 0, 65535));
+        return new(FrameType.MirrorBegin, p);
+    }
+
+    /// <summary>One chunk of a captured region's JPEG. The region and keyframe flag ride in every chunk so a
+    /// frame reassembles whatever order chunks arrive, and a keyframe alone (region = the whole window) tells
+    /// the receiver the source size even if MirrorBegin was lost.</summary>
+    public static Frame MirrorChunk(ushort frameId, ushort index, ushort count, int x, int y, int w, int h, bool keyframe, ReadOnlySpan<byte> data)
+    {
+        var p = new byte[MirrorChunkHeader + data.Length];
+        BinaryPrimitives.WriteUInt16LittleEndian(p, frameId);
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), index);
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(4), count);
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(6), (ushort)Math.Clamp(x, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(8), (ushort)Math.Clamp(y, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(10), (ushort)Math.Clamp(w, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(12), (ushort)Math.Clamp(h, 0, 65535));
+        p[14] = keyframe ? (byte)1 : (byte)0;
+        data.CopyTo(p.AsSpan(MirrorChunkHeader));
+        return new(FrameType.MirrorChunk, p);
+    }
+
+    public static Frame MirrorEnd() => new(FrameType.MirrorEnd, []);
 
     public static IEnumerable<Frame> ClipboardText(byte id, string text)
     {

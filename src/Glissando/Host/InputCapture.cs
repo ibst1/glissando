@@ -130,8 +130,11 @@ public sealed class InputCapture : IDisposable
             case Native.WM_MBUTTONUP: Button(3, false); break;
             case Native.WM_XBUTTONDOWN: Button((byte)(3 + (info.mouseData >> 16)), true); break;
             case Native.WM_XBUTTONUP: Button((byte)(3 + (info.mouseData >> 16)), false); break;
-            case Native.WM_MOUSEWHEEL: Output?.Invoke(Frame.MouseWheel((short)(info.mouseData >> 16), false)); break;
-            case Native.WM_MOUSEHWHEEL: Output?.Invoke(Frame.MouseWheel((short)(info.mouseData >> 16), true)); break;
+            // Wheel is swallowed here (return 1 below) but forwarded from Raw Input in OnRawInput, which also
+            // catches a precision touchpad's scroll that never reaches this hook.
+            case Native.WM_MOUSEWHEEL:
+            case Native.WM_MOUSEHWHEEL:
+                break;
         }
         return 1;
     }
@@ -219,6 +222,18 @@ public sealed class InputCapture : IDisposable
         int m = Native.RawHeaderSize;
         ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m));
         if ((flags & Native.MOUSE_MOVE_ABSOLUTE) != 0) return; // tablets/RDP: not supported yet
+
+        // Wheel comes from Raw Input, not the low-level hook: a precision touchpad's two-finger scroll bypasses
+        // WH_MOUSE_LL entirely (it would otherwise scroll the parked local cursor and never reach the peer).
+        // Raw Input sees the device directly. The hook still swallows a regular mouse's wheel but no longer
+        // forwards it, so the two sources never double. Wheel reports carry no movement, so handle it first.
+        ushort buttonFlags = BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m + 4));
+        if ((buttonFlags & (Native.RI_MOUSE_WHEEL | Native.RI_MOUSE_HWHEEL)) != 0 && Remote)
+        {
+            short delta = unchecked((short)BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m + 6)));
+            Output?.Invoke(Frame.MouseWheel(delta, (buttonFlags & Native.RI_MOUSE_HWHEEL) != 0));
+        }
+
         int dx = BinaryPrimitives.ReadInt32LittleEndian(_rawBuf.AsSpan(m + 12));
         int dy = BinaryPrimitives.ReadInt32LittleEndian(_rawBuf.AsSpan(m + 16));
         if (dx == 0 && dy == 0) return;

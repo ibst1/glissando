@@ -45,6 +45,10 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private readonly InputInjector _injector;
     private readonly Icon _iconIdle, _iconReady, _iconControlling, _iconControlled, _iconLocked, _iconError;
     private readonly ToolStripMenuItem _lockItem;
+    private readonly ToolStripMenuItem _mirrorItem;
+    private readonly Mirror.MirrorReceiver _mirrorRx = new();
+    private readonly System.Windows.Forms.Timer _fgTimer = new() { Interval = 400 };
+    private IntPtr _lastRealWindow;
     private SettingsForm? _openForm;
     private readonly Microsoft.Win32.PowerModeChangedEventHandler _powerHandler;
     private readonly Microsoft.Win32.SessionSwitchEventHandler _sessionHandler;
@@ -62,17 +66,25 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _status = new ToolStripMenuItem("Starting") { Enabled = false };
         _lockItem = new ToolStripMenuItem("Lock cursor to this PC") { ShortcutKeyDisplayString = "Ctrl+Alt+L", CheckOnClick = true };
         _lockItem.Click += (_, _) => _session?.SetLocked(_lockItem.Checked);
+        _mirrorItem = new ToolStripMenuItem("Mirror the active window to the other PC");
+        _mirrorItem.Click += (_, _) => ToggleMirror();
         var menu = new ContextMenuStrip();
         menu.Items.Add(new ToolStripMenuItem($"Glissando {Program.VersionLong}") { Enabled = false });
         menu.Items.Add(_status);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_lockItem);
+        menu.Items.Add(_mirrorItem);
         menu.Items.Add("Settings...", null, (_, _) => OpenSettings());
         menu.Items.Add("Reconnect", null, (_, _) => _session?.Reconnect());
         menu.Items.Add("Open log", null, (_, _) => OpenPath(Log.FilePath));
         menu.Items.Add("Copy diagnostics", null, (_, _) => CopyDiagnostics());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => Exit());
+        // Track the last real application window that was in front, so "Mirror the active window" targets what
+        // the user was actually using -- reading the foreground when the tray menu opens grabs the wrong (tiny
+        // shell) window, since clicking the tray already moved focus.
+        _fgTimer.Tick += (_, _) => TrackForeground();
+        _fgTimer.Start();
 
         _tray = new NotifyIcon { Icon = _iconIdle, Visible = true, Text = "Glissando", ContextMenuStrip = menu };
         _tray.DoubleClick += (_, _) => OpenSettings();
@@ -95,6 +107,8 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _session = new Session(settings, channel, _capture, _injector, this);
         _session.StateChanged += () => _window.BeginInvoke(UpdateTray);
         _session.SettingsChanged += () => _window.BeginInvoke(() => _openForm?.Reload(_settings, _session.PeerName));
+        // Incoming window-mirroring frames arrive on the receive thread; paint them on the UI thread.
+        _session.MirrorReceived += f => _window.BeginInvoke(() => _mirrorRx.Handle(f));
 
         // After sleep the Bluetooth stack often needs a nudge.
         _powerHandler = (_, e) =>
@@ -116,6 +130,40 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     }
 
     private bool _versionWarned;
+
+    /// <summary>Remember the front application window (not ours, visible, titled, of a real size), so mirroring
+    /// can target the window the user was using rather than whatever tiny window has focus at menu time.</summary>
+    private void TrackForeground()
+    {
+        if (_session.Mirroring) return; // keep the chosen window while mirroring
+        var h = Mirror.WindowCapture.Foreground();
+        if (h == IntPtr.Zero || h == _window.Handle) return;
+        if (Mirror.WindowCapture.ProcessId(h) == (uint)Environment.ProcessId) return;
+        if (!Mirror.WindowCapture.Visible(h) || string.IsNullOrEmpty(Mirror.WindowCapture.Title(h))) return;
+        if (Mirror.WindowCapture.SizeOf(h) is not Size s || s.Width < 200 || s.Height < 150) return;
+        _lastRealWindow = h;
+    }
+
+    private void ToggleMirror()
+    {
+        if (_session.Mirroring)
+        {
+            _session.StopMirror();
+            _mirrorRx.Close();
+        }
+        else
+        {
+            if (_lastRealWindow == IntPtr.Zero || Mirror.WindowCapture.SizeOf(_lastRealWindow) == null)
+            {
+                _tray.ShowBalloonTip(3000, "Glissando", "No window to mirror. Click the window you want, then use the tray menu.", ToolTipIcon.Info);
+                return;
+            }
+            string title = Mirror.WindowCapture.Title(_lastRealWindow);
+            _session.StartMirror(_lastRealWindow);
+            _tray.ShowBalloonTip(3000, "Glissando", $"Mirroring \"{title}\" to the other PC.", ToolTipIcon.Info);
+        }
+        UpdateTray();
+    }
 
     private async void CopyDiagnostics()
     {
@@ -140,6 +188,8 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         string text = _session.StatusText;
         _status.Text = text;
         _lockItem.Checked = _session.Locked;
+        _mirrorItem.Checked = _session.Mirroring;
+        _mirrorItem.Enabled = _session.Authenticated || _session.Mirroring;
         bool mismatch = _session.TransportStatus.StartsWith("other PC runs");
         if (mismatch && !_versionWarned)
         {
@@ -147,7 +197,21 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             _tray.ShowBalloonTip(8000, "Glissando", $"The other PC runs another Glissando version. Install {Program.Version} there too.", ToolTipIcon.Warning);
         }
         if (_session.Authenticated) _versionWarned = false;
-        _tray.Text = Trim63($"Glissando {Program.Version}: " + text);
+        // Windows truncates a long tray tooltip on hover, so the tip is a short summary; the full multi-line
+        // status lives in the first menu row (_status.Text above), which has no such limit.
+        // Build id first so it survives the 63-char trim; the live status fills the rest.
+        string tip = $"Glissando {Program.Version}";
+        if (!_session.Authenticated)
+            tip += ": " + _session.TransportStatus;                          // scanning / advertising / BLE error ...
+        else
+        {
+            string role = _session.Controlling ? "controlling" : _session.Controlled ? "controlled" : "linked";
+            string peer = string.IsNullOrEmpty(_session.PeerName) ? "" : " " + _session.PeerName;
+            string rtt = _session.RttMs > 0 ? $", {_session.RttMs:F0} ms" : "";
+            string locked = _session.Locked ? ", locked" : "";
+            tip += $": {role}{peer}{rtt}{locked}";
+        }
+        _tray.Text = Trim(tip, 63);
         _tray.Icon = _session.TransportStatus.StartsWith("BLE error") ? _iconError
             : _session.Controlling ? _iconControlling
             : _session.Controlled ? _iconControlled
@@ -156,7 +220,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             : _iconIdle;
     }
 
-    private static string Trim63(string s) => s.Length <= 63 ? s : s[..60] + "...";
+    private static string Trim(string s, int max) => s.Length <= max ? s : s[..(max - 3)] + "...";
 
     private void OpenSettings()
     {
@@ -216,6 +280,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         {
             Microsoft.Win32.SystemEvents.PowerModeChanged -= _powerHandler;
             Microsoft.Win32.SystemEvents.SessionSwitch -= _sessionHandler;
+            _fgTimer.Stop();
+            _fgTimer.Dispose();
+            _mirrorRx.Close();
             _session.Dispose();
             _capture.Dispose();
             Host.CursorHider.Restore();

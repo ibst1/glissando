@@ -72,8 +72,12 @@ Glissando.exe --ble connect --console pin the Bluetooth role, show the log
 
 ## What works and what does not
 
-* Mouse movement, buttons, wheel; keyboard including Win and Alt combinations.
+* Mouse movement, buttons and wheel; keyboard including Win and Alt combinations.
   Keys are sent as scan codes, so both PCs should use the same keyboard layout.
+  The wheel is read from Raw Input, so a mouse scrolls the other PC; a **precision
+  touchpad's two-finger scroll does not cross**, because Windows delivers it as
+  digitizer input that neither the low-level mouse hook nor mouse Raw Input sees.
+  Scroll the other PC with a mouse wheel or the keyboard (PageUp/PageDown, arrows).
 * Clipboard text is copied across each time the cursor crosses over.
 * A **Bluetooth mouse or keyboard on the controlling PC shares this one Bluetooth
   radio with Glissando.** While you move such a mouse it floods the radio with its
@@ -97,8 +101,10 @@ Glissando.exe --ble connect --console pin the Bluetooth role, show the log
   without administrator rights, so this swaps the whole system cursor set
   for blank cursors and reloads your cursor scheme when control returns
   (also on exit or crash). Off by default; turn it on in the settings dialog.
-* Not yet: files on the clipboard, absolute-position devices (tablets, RDP)
-  as the controlling mouse.
+* Not yet: files on the clipboard; absolute-position devices (tablets, RDP) as the
+  controlling mouse; forwarding a precision touchpad's two-finger scroll (would
+  need raw touchpad-HID parsing and two-finger gesture detection on the
+  controlling side).
 
 ## Security
 

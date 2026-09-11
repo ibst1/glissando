@@ -214,13 +214,16 @@ internal sealed class SettingsForm : Form
         _originalOrigin = initial.PeerOrigin;
 
         Text = (firstRun ? "Glissando setup" : "Glissando settings") + $"  ({Program.VersionLong})";
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false;
+        // Resizable, and never taller than the screen: the content panel below scrolls for the rest. The old
+        // fixed 800 px height ran off a laptop screen and hid the buttons and the last options.
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(524, 800);
-        MinimumSize = new Size(420, 420);
+        int workingHeight = Screen.PrimaryScreen?.WorkingArea.Height ?? 800;
+        ClientSize = new Size(524, Math.Clamp(workingHeight - 80, 360, 800));
+        MinimumSize = new Size(440, 300);
         Font = new Font("Segoe UI", 9f);
         Log.Info($"settings form opening: firstRun={firstRun} peerOrigin={initial.PeerOrigin} mine={initial.Mine.Length} peer={initial.Peer.Length}");
         Log.Info("crossings: " + string.Join(" | ", initial.CrossingSegments().Select(s => $"{s.Side}@{s.Fixed} {s.From}-{s.To}")));
@@ -310,7 +313,22 @@ internal sealed class SettingsForm : Form
         AcceptButton = ok;
         CancelButton = cancel;
 
+        Shown += (_, _) => FitToScreen();
         Shown += async (_, _) => await LoadBluetoothInfoAsync();
+    }
+
+    /// <summary>Shrink and nudge the window so it fits, fully visible, on whatever screen it actually opened on.
+    /// The initial size is clamped to the primary screen's height, but the dialog can open on a smaller one; the
+    /// content panel scrolls, so shrinking here keeps every control (and the bottom button bar) reachable.</summary>
+    private void FitToScreen()
+    {
+        var wa = Screen.FromControl(this).WorkingArea;
+        if (Height > wa.Height) Height = wa.Height;
+        if (Width > wa.Width) Width = wa.Width;
+        if (Bottom > wa.Bottom) Top = wa.Bottom - Height;
+        if (Top < wa.Top) Top = wa.Top;
+        if (Right > wa.Right) Left = wa.Right - Width;
+        if (Left < wa.Left) Left = wa.Left;
     }
 
     /// <summary>The peer sent its monitors or a newer placement: reflect it while the form is open.</summary>

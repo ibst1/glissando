@@ -196,6 +196,8 @@ internal static class Native
     public const uint RID_INPUT = 0x10000003;
     public const uint RIM_TYPEMOUSE = 0;
     public const ushort MOUSE_MOVE_ABSOLUTE = 0x01;
+    // RAWMOUSE.usButtonFlags bits for the wheel; the signed delta is in usButtonData (usButtonFlags+2).
+    public const ushort RI_MOUSE_WHEEL = 0x0400, RI_MOUSE_HWHEEL = 0x0800;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RAWINPUTDEVICE
