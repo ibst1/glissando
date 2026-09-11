@@ -37,7 +37,9 @@ makes the mouse rubbery.
    **Ctrl+Alt+L** (or the tray menu) locks the cursor to the PC you are on,
    for games, presentations or anything that lives against the shared edge;
    press it again to unlock. **Ctrl+Alt+J** jumps to the middle of the other
-   PC's first screen without dragging to an edge, and back again. The tray
+   PC's first screen without dragging to an edge, and back again. All three
+   want the *left* Ctrl, so a remapper that turns CapsLock into right Ctrl
+   (Sostenuto does) cannot trip them. The tray
    menu shows the measured round trip to the other PC, and *Copy
    diagnostics* puts everything useful for a bug report on the clipboard.
 

@@ -154,13 +154,15 @@ public sealed class InputCapture : IDisposable
 
         if (!Remote)
         {
-            // Local mode: only the lock hotkey is ours. Modifier state is real here (nothing is swallowed).
-            if (!up && info.vkCode == Native.VK_L && Native.IsDown(Native.VK_CONTROL) && Native.IsDown(Native.VK_MENU))
+            // Local mode: only the lock/jump hotkeys are ours. LEFT Ctrl specifically, so a key-remapper that
+            // turns CapsLock into RIGHT Ctrl (Sostenuto does) cannot trip these -- otherwise its CapsLock+Alt+J
+            // reads as Ctrl+Alt+J and jumps. Modifier state is real here (nothing is swallowed).
+            if (!up && info.vkCode == Native.VK_L && Native.IsDown(Native.VK_LCONTROL) && Native.IsDown(Native.VK_MENU))
             {
                 LockToggleRequested?.Invoke();
                 return 1;
             }
-            if (!up && info.vkCode == Native.VK_J && Native.IsDown(Native.VK_CONTROL) && Native.IsDown(Native.VK_MENU))
+            if (!up && info.vkCode == Native.VK_J && Native.IsDown(Native.VK_LCONTROL) && Native.IsDown(Native.VK_MENU))
             {
                 JumpRequested?.Invoke();
                 return 1;
@@ -172,20 +174,20 @@ public sealed class InputCapture : IDisposable
 
         var key = ((ushort)info.vkCode, (ushort)info.scanCode, ext);
 
-        if (!up && info.vkCode == Native.VK_ESCAPE && CtrlDown() && AltDown())
+        if (!up && info.vkCode == Native.VK_ESCAPE && LCtrlDown() && AltDown())
         {
             Log.Info("escape hotkey: leaving remote");
             LeaveRemote(null);
             return 1;
         }
-        if (!up && info.vkCode == Native.VK_L && CtrlDown() && AltDown())
+        if (!up && info.vkCode == Native.VK_L && LCtrlDown() && AltDown())
         {
             Log.Info("lock hotkey while remote: leaving remote and locking");
             LeaveRemote(null);
             LockToggleRequested?.Invoke();
             return 1;
         }
-        if (!up && info.vkCode == Native.VK_J && CtrlDown() && AltDown())
+        if (!up && info.vkCode == Native.VK_J && LCtrlDown() && AltDown())
         {
             Log.Info("jump hotkey while remote: coming back");
             LeaveRemote(null);
@@ -204,7 +206,8 @@ public sealed class InputCapture : IDisposable
     /// <summary>Log every key forwarded and applied, to diagnose lost keystrokes. Enable with --keylog.</summary>
     public static bool KeyLog;
 
-    private bool CtrlDown() => _keysDown.Any(k => k.vk is Native.VK_LCONTROL or Native.VK_RCONTROL);
+    // LEFT Ctrl only, so a CapsLock-to-right-Ctrl remapper's chords do not fire our escape/lock/jump hotkeys.
+    private bool LCtrlDown() => _keysDown.Any(k => k.vk == Native.VK_LCONTROL);
     private bool AltDown() => _keysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU);
 
     // ---- raw input --------------------------------------------------------------
