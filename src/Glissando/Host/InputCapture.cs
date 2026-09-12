@@ -127,6 +127,12 @@ public sealed class InputCapture : IDisposable
             return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
         }
 
+        // Our own injections while remote -- the mirror driving a window on THIS PC while it controls the
+        // other one -- are for this PC: pass them through, neither swallowed nor forwarded. Without this the
+        // mirror's clicks were eaten here and sent to the peer as clicks (2026-09-12). Only OUR tag is exempt:
+        // a key-remapper's injected keys carry its own tag, and forwarding those is how its remaps reach the peer.
+        if (info.dwExtraInfo == Native.InjectTag) return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+
         switch (msg)
         {
             case Native.WM_MOUSEMOVE:
@@ -184,6 +190,9 @@ public sealed class InputCapture : IDisposable
             }
             return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
         }
+
+        // Our own injections are for this PC (see MouseHook): keys typed into the mirror went to the peer instead.
+        if (info.dwExtraInfo == Native.InjectTag) return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
 
         var key = ((ushort)info.vkCode, (ushort)info.scanCode, ext);
 
@@ -243,8 +252,11 @@ public sealed class InputCapture : IDisposable
         // WH_MOUSE_LL entirely (it would otherwise scroll the parked local cursor and never reach the peer).
         // Raw Input sees the device directly. The hook still swallows a regular mouse's wheel but no longer
         // forwards it, so the two sources never double. Wheel reports carry no movement, so handle it first.
+        // Raw Input carries SendInput's dwExtraInfo as ulExtraInformation: our own injected wheel and moves
+        // (the mirror scrolling a window on this PC) must not be forwarded to the peer on top.
+        bool ours = got >= (uint)(m + 24) && BinaryPrimitives.ReadUInt32LittleEndian(_rawBuf.AsSpan(m + 20)) == (uint)Native.InjectTag.ToInt64();
         ushort buttonFlags = BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m + 4));
-        if ((buttonFlags & (Native.RI_MOUSE_WHEEL | Native.RI_MOUSE_HWHEEL)) != 0 && Remote)
+        if ((buttonFlags & (Native.RI_MOUSE_WHEEL | Native.RI_MOUSE_HWHEEL)) != 0 && Remote && !ours)
         {
             short delta = unchecked((short)BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m + 6)));
             Output?.Invoke(Frame.MouseWheel(delta, (buttonFlags & Native.RI_MOUSE_HWHEEL) != 0));
@@ -254,6 +266,7 @@ public sealed class InputCapture : IDisposable
         int dy = BinaryPrimitives.ReadInt32LittleEndian(_rawBuf.AsSpan(m + 16));
         if (dx == 0 && dy == 0) return;
         if (!Remote) { TryCross(dx, dy); return; }
+        if (ours) return; // the mirror's own move on this PC, not the user's hand on the mouse
         Interlocked.Increment(ref MovesForwarded);
         Output?.Invoke(Frame.MouseMove(dx, dy));
     }

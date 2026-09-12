@@ -73,7 +73,10 @@ internal sealed class MirrorSender
         _cts?.Cancel();
         _target.ReleaseAll();
         WindowHider.Unhide();
-        try { _send(Frame.MirrorEnd()); } catch { }
+        // Three copies, like MirrorBegin: a lone MirrorEnd is a best-effort frame, and on the slow direction it
+        // got lost often enough that the viewer's window stayed open showing a stale picture, which read as
+        // "the mirror cannot be turned off" (2026-09-12). The receiver's End is idempotent.
+        try { for (int i = 0; i < 3; i++) _send(Frame.MirrorEnd()); } catch { }
     }
 
     private void Loop(CancellationToken ct)

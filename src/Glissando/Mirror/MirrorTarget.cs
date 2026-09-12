@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace Glissando.Mirror;
@@ -18,6 +19,8 @@ internal sealed class MirrorTarget
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _keysDown = [];
     private readonly HashSet<byte> _buttonsDown = [];
     private readonly object _gate = new();
+    private long _lastInputLog;
+    private int _inputsApplied;
 
     public MirrorTarget(IntPtr hwnd) => _hwnd = hwnd;
 
@@ -36,6 +39,19 @@ internal sealed class MirrorTarget
                 case FrameType.MirrorKey:
                     if (f.Payload.Length >= 5) Key(f.U16(0), f.U16(2), (f.Payload[4] & 1) != 0, (f.Payload[4] & 2) != 0);
                     break;
+            }
+            // Evidence in the log that the viewer's input reaches this side and where it lands: a line every
+            // few seconds while it flows, not one per event.
+            if (f.Type != FrameType.MirrorPointer)
+            {
+                _inputsApplied++;
+                long now = Stopwatch.GetTimestamp();
+                if (now - _lastInputLog > Stopwatch.Frequency * 4)
+                {
+                    _lastInputLog = now;
+                    Log.Info($"mirror input: {_inputsApplied} click/key events applied; foreground now \"{WindowCapture.Title(GetForegroundWindow())}\"");
+                    _inputsApplied = 0;
+                }
             }
         }
     }
