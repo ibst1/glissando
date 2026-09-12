@@ -9,6 +9,11 @@ namespace Glissando.Mirror;
 /// plus a few rotating "refresh" tiles that heal any tile a dropped chunk left stale -- there is no periodic
 /// full-window keyframe to saturate the link and make edits queue behind it. Sending is paced against the send
 /// queue so it never overflows: input frames must never wait behind window pixels.
+///
+/// Two paths: BLE (always there; slow, so tightly budgeted) and the UDP pixel path over a shared network when
+/// it is up (see UdpPixelLink), chosen afresh every frame. Tiles are encoded in parallel straight out of the
+/// captured pixel buffer: one thread cloning and encoding 128 px tiles one by one managed ~360 tiles/s, which
+/// made a full-window change on a 4K window take more than a second even with megabytes per second to spare.
 /// </summary>
 internal sealed class MirrorSender
 {
@@ -27,21 +32,38 @@ internal sealed class MirrorSender
     private const int SlowFrameBytes = 2800;
     private const int FastFrameBytes = 15000;
 
+    // Over the UDP pixel path (Wi-Fi, measured 2.5 MB/s) everything is a size up: a datagram holds most of a
+    // tile, tiles are 256 px (a quarter of the encodes and datagrams per area), the quality is higher, the
+    // frame rate too, and the budget is an order of magnitude bigger. The capture is what costs then.
+    private const int UdpTile = 256;
+    private const long UdpQuality = 60;
+    private const int UdpChunkData = 1100;
+    private const int UdpFrameBytes = 160_000;
+    private const int UdpFps = 30;
+    private const int UdpRefreshEveryMs = 40;
+
     private readonly IntPtr _hwnd;
     private readonly Action<Frame> _send;
     private readonly Func<int> _queueDepth;
     private readonly bool _slowLink;
     private readonly bool _hide;
+    private readonly Func<bool> _udpUp;
+    private readonly Action<Frame> _sendUdp;
     private readonly MirrorTarget _target;
     private CancellationTokenSource? _cts;
 
-    public MirrorSender(IntPtr hwnd, Action<Frame> send, Func<int> queueDepth, bool slowLink, bool hide)
+    /// <param name="send">The BLE path: control frames always, pixels when UDP is down.</param>
+    /// <param name="udpUp">Whether the UDP pixel path is up right now (re-read every frame).</param>
+    /// <param name="sendUdp">The UDP path for pixel chunks.</param>
+    public MirrorSender(IntPtr hwnd, Action<Frame> send, Func<int> queueDepth, bool slowLink, bool hide, Func<bool> udpUp, Action<Frame> sendUdp)
     {
         _hwnd = hwnd;
         _send = send;
         _queueDepth = queueDepth;
         _slowLink = slowLink;
         _hide = hide;
+        _udpUp = udpUp;
+        _sendUdp = sendUdp;
         _target = new MirrorTarget(hwnd);
     }
 
@@ -82,20 +104,33 @@ internal sealed class MirrorSender
     private void Loop(CancellationToken ct)
     {
         byte[]? prev = null;
-        int prevStride = 0, prevW = 0, prevH = 0, lastW = -1, lastH = -1, refreshCursor = 0;
+        int prevStride = 0, prevW = 0, prevH = 0, lastW = -1, lastH = -1, lastTile = 0, refreshCursor = 0;
         ushort frameId = 0;
-        int interval = Math.Max(1, 1000 / Fps);
         var logClock = Stopwatch.StartNew();
         var refreshClock = Stopwatch.StartNew();
-        int txTiles = 0, txChunks = 0, txBytes = 0;
+        int txTiles = 0, txChunks = 0, txBytes = 0, frames = 0;
+        long tCapture = 0, tDiff = 0, tEncode = 0, tSend = 0;
         string lastMode = "";
         int tileEstimate = 2000;   // running average of an encoded tile, seeds the per-frame budget check
+        bool lastUdp = false, pathLogged = false;
 
         while (!ct.IsCancellationRequested)
         {
             int t0 = Environment.TickCount;
+            bool udp = _udpUp();
+            int interval = Math.Max(1, 1000 / (udp ? UdpFps : Fps));
+            int tile = udp ? UdpTile : Tile;
+            long quality = udp ? UdpQuality : Quality;
+            int chunk = udp ? UdpChunkData : ChunkData;
+            var sender = udp ? _sendUdp : _send;
+            if (udp != lastUdp || !pathLogged)
+            {
+                lastUdp = udp; pathLogged = true;
+                Log.Info(udp ? "mirror tx: pixels via UDP (shared network)" : "mirror tx: pixels via BLE");
+            }
             try
             {
+                long s0 = Stopwatch.GetTimestamp();
                 bool hidden = Hidden;
                 using var bmp = WindowCapture.Capture(_hwnd, hidden, out bool fromScreen);
                 if (bmp == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(); break; }
@@ -118,53 +153,44 @@ internal sealed class MirrorSender
                     lastW = w; lastH = h; prev = null; refreshCursor = 0;       // a fresh heal pass for the new size
                     Log.Info($"mirror tx: begin {w}x{h}");
                 }
+                if (tile != lastTile) { lastTile = tile; refreshCursor = 0; }
 
                 var cur = WindowCapture.Pixels(bmp, out int stride);
+                long s1 = Stopwatch.GetTimestamp();
                 bool sameShape = prev != null && prevW == w && prevH == h && prevStride == stride;
                 bool first = !sameShape;
 
-                int tilesX = (w + Tile - 1) / Tile, tilesY = (h + Tile - 1) / Tile, tileCount = tilesX * tilesY;
-                var sent = new bool[tileCount];
-
-                int SendIndex(int idx, bool full)
+                int tilesX = (w + tile - 1) / tile, tilesY = (h + tile - 1) / tile, tileCount = tilesX * tilesY;
+                Rectangle RegionOf(int idx)
                 {
                     int col = idx % tilesX, row = idx / tilesX;
-                    int tx = col * Tile, ty = row * Tile;
-                    int tw = Math.Min(Tile, w - tx), th = Math.Min(Tile, h - ty);
-                    while (_queueDepth() > PaceBelow && !ct.IsCancellationRequested) ct.WaitHandle.WaitOne(3);
-                    var region = new Rectangle(tx, ty, tw, th);
-                    byte[] jpeg = WindowCapture.EncodeJpeg(bmp, Quality, region);
-                    SendTile(frameId++, region, full, jpeg);
-                    sent[idx] = true;
-                    txTiles++; txBytes += jpeg.Length;
-                    txChunks += Math.Max(1, (jpeg.Length + ChunkData - 1) / ChunkData);
-                    return jpeg.Length;
+                    int tx = col * tile, ty = row * tile;
+                    return new Rectangle(tx, ty, Math.Min(tile, w - tx), Math.Min(tile, h - ty));
                 }
 
-                int budget = _slowLink ? SlowFrameBytes : FastFrameBytes;
-                int spentBytes = 0;
+                // Decide the frame's tiles: every dirty tile within the byte budget, deferring the rest.
+                var regions = new List<Rectangle>();
+                var fulls = new List<bool>();
+                int budget = udp ? UdpFrameBytes : _slowLink ? SlowFrameBytes : FastFrameBytes;
+                int planned = 0;
                 for (int idx = 0; idx < tileCount && !ct.IsCancellationRequested; idx++)
                 {
-                    int col = idx % tilesX, row = idx / tilesX;
-                    int tx = col * Tile, ty = row * Tile;
-                    int tw = Math.Min(Tile, w - tx), th = Math.Min(Tile, h - ty);
-                    if (!(first || !WindowCapture.TileEqual(prev!, cur, stride, tx, ty, tx + tw, ty + th)))
+                    var r = RegionOf(idx);
+                    if (!(first || !WindowCapture.TileEqual(prev!, cur, stride, r.Left, r.Top, r.Right, r.Bottom)))
                         continue;
                     // The first frame (start or resize) has no prior to defer against, so it goes whole; after
                     // that, once the frame's byte budget is spent the rest of a big change waits. An unsent
                     // dirty tile must not be forgotten: revert it in cur to the old pixels so it still differs
                     // next frame and is picked up then (a few frames to fully redraw a scroll, never a freeze).
                     // Budget is checked with the expected size of the NEXT tile, not after the fact: testing
-                    // spentBytes < budget alone let every frame overshoot by one tile, twelve times a second,
-                    // which showed as 90-100 kB per 2 s against a 67 kB budget (2026-09-12).
-                    if (first || spentBytes + tileEstimate <= budget)
+                    // spent < budget alone let every frame overshoot by one tile, twelve times a second.
+                    if (first || planned + tileEstimate <= budget)
                     {
-                        int n = SendIndex(idx, first);
-                        spentBytes += n;
-                        tileEstimate = (tileEstimate * 3 + n) / 4;
+                        regions.Add(r); fulls.Add(first);
+                        planned += tileEstimate;
                     }
                     else
-                        WindowCapture.CopyTile(prev!, cur, stride, tx, ty, tx + tw, ty + th);
+                        WindowCapture.CopyTile(prev!, cur, stride, r.Left, r.Top, r.Right, r.Bottom);
                 }
 
                 // Heal stale tiles in the background, paced by the LINK rather than a clock: a heal tile goes
@@ -174,13 +200,31 @@ internal sealed class MirrorSender
                 // every RefreshEveryMs. A fixed 60 ms trickle at 12 fps was 12 tiles/s, ~40 kB/s of constant
                 // load, which saturated the slow BLE direction (peripheral -> central) even with nothing to show.
                 bool healing = refreshCursor < tileCount;
-                if (!first && sent.Count(b => b) == 0 && _queueDepth() == 0
-                    && (healing || refreshClock.ElapsedMilliseconds >= RefreshEveryMs))
+                if (!first && regions.Count == 0 && (udp || _queueDepth() == 0)
+                    && (healing || refreshClock.ElapsedMilliseconds >= (udp ? UdpRefreshEveryMs : RefreshEveryMs)))
                 {
-                    int idx = refreshCursor++ % tileCount;
-                    SendIndex(idx, true);
+                    regions.Add(RegionOf(refreshCursor++ % tileCount)); fulls.Add(true);
                     refreshClock.Restart();
                 }
+                long s2 = Stopwatch.GetTimestamp();
+
+                if (regions.Count > 0)
+                {
+                    var jpegs = WindowCapture.EncodeTiles(cur, stride, regions, quality);
+                    long s3 = Stopwatch.GetTimestamp();
+                    int sum = 0;
+                    for (int i = 0; i < regions.Count && !ct.IsCancellationRequested; i++)
+                    {
+                        if (!udp) while (_queueDepth() > PaceBelow && !ct.IsCancellationRequested) ct.WaitHandle.WaitOne(3);
+                        SendTile(frameId++, regions[i], fulls[i], jpegs[i], chunk, sender);
+                        sum += jpegs[i].Length;
+                        txChunks += Math.Max(1, (jpegs[i].Length + chunk - 1) / chunk);
+                    }
+                    txTiles += regions.Count; txBytes += sum;
+                    tileEstimate = (tileEstimate + sum / regions.Count) / 2;
+                    tEncode += s3 - s2; tSend += Stopwatch.GetTimestamp() - s3;
+                }
+                tCapture += s1 - s0; tDiff += s2 - s1; frames++;
 
                 prev = cur; prevStride = stride; prevW = w; prevH = h;
             }
@@ -188,8 +232,10 @@ internal sealed class MirrorSender
 
             if (logClock.ElapsedMilliseconds >= 2000)
             {
-                Log.Info($"mirror tx: {txTiles} tiles, {txChunks} chunks, {txBytes / 1024} kB in {logClock.ElapsedMilliseconds} ms");
-                txTiles = txChunks = txBytes = 0; logClock.Restart();
+                double ms = 1000.0 / Stopwatch.Frequency;
+                int f = Math.Max(1, frames);
+                Log.Info($"mirror tx: {txTiles} tiles, {txChunks} chunks, {txBytes / 1024} kB in {logClock.ElapsedMilliseconds} ms; {frames} frames, per frame capture {tCapture * ms / f:F0} ms, diff {tDiff * ms / f:F0} ms, encode {tEncode * ms / f:F0} ms, send {tSend * ms / f:F0} ms");
+                txTiles = txChunks = txBytes = frames = 0; tCapture = tDiff = tEncode = tSend = 0; logClock.Restart();
             }
 
             int spent = Environment.TickCount - t0;
@@ -197,14 +243,14 @@ internal sealed class MirrorSender
         }
     }
 
-    private void SendTile(ushort frameId, Rectangle region, bool full, byte[] jpeg)
+    private static void SendTile(ushort frameId, Rectangle region, bool full, byte[] jpeg, int chunkData, Action<Frame> send)
     {
-        int count = Math.Max(1, (jpeg.Length + ChunkData - 1) / ChunkData);
+        int count = Math.Max(1, (jpeg.Length + chunkData - 1) / chunkData);
         for (int i = 0; i < count; i++)
         {
-            int off = i * ChunkData;
-            int len = Math.Min(ChunkData, jpeg.Length - off);
-            _send(Frame.MirrorChunk(frameId, (ushort)i, (ushort)count, region.X, region.Y, region.Width, region.Height, full, jpeg.AsSpan(off, len)));
+            int off = i * chunkData;
+            int len = Math.Min(chunkData, jpeg.Length - off);
+            send(Frame.MirrorChunk(frameId, (ushort)i, (ushort)count, region.X, region.Y, region.Width, region.Height, full, jpeg.AsSpan(off, len)));
         }
     }
 }

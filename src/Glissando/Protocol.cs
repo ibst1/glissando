@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -29,6 +30,7 @@ public enum FrameType : byte
     MirrorPointer = 21, // x(u16) y(u16): the viewer's pointer over the mirror, in source-window pixels (best effort)
     MirrorMouse = 22,   // kind(1: 1=down 2=up 3=wheel 4=hwheel) x(u16) y(u16) button(1) delta(i16): a click or wheel on the mirror
     MirrorKey = 23,     // vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key typed into the mirror
+    UdpProbe = 24,      // empty; sent over the UDP pixel path to punch it through the firewalls and keep it up
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -136,7 +138,8 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         var versionBytes = Encoding.UTF8.GetBytes(h.AppVersion ?? "");
         if (versionBytes.Length > 40) versionBytes = versionBytes[..40];
         var monitors = h.Monitors.Take(HelloInfo.MaxMonitors).ToArray();
-        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + 1 + versionBytes.Length + nameBytes.Length];
+        int udpCount = Math.Min(8, h.UdpAddresses?.Length ?? 0);
+        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + 1 + versionBytes.Length + 3 + udpCount * 4 + nameBytes.Length];
         p[0] = HelloInfo.Version;
         p[1] = (byte)(h.CaptureEnabled ? 1 : 0);
         BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(2), h.PeerOrigin.X);
@@ -159,6 +162,12 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         p[o++] = (byte)versionBytes.Length;
         versionBytes.CopyTo(p, o);
         o += versionBytes.Length;
+        // Where this PC listens for the UDP pixel path (port 0 = not offered), then the name to the end.
+        var addrs = (h.UdpAddresses ?? []).Take(8).ToArray();
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(o), h.UdpPort);
+        p[o + 2] = (byte)addrs.Length;
+        o += 3;
+        foreach (var a in addrs) { a.GetAddressBytes().AsSpan(0, 4).CopyTo(p.AsSpan(o)); o += 4; }
         nameBytes.CopyTo(p, o);
         return new(FrameType.Hello, p);
     }
@@ -248,9 +257,10 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
 /// is where the sender believes the receiver's origin sits, in the sender's pixels; placements are
 /// compared by timestamp so that whichever PC was configured last wins. Monitors are the sender's own.
 /// </summary>
-public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Screen, long PlacementUpdated, byte[] Nonce, MonitorRect[] Monitors, string Name, string AppVersion = "")
+public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Screen, long PlacementUpdated, byte[] Nonce, MonitorRect[] Monitors, string Name, string AppVersion = "",
+    ushort UdpPort = 0, IPAddress[]? UdpAddresses = null)
 {
-    public const byte Version = 4;
+    public const byte Version = 5;   // 5: UDP pixel-path port and addresses after the app version
     public const int FixedSize = 1 + 1 + 4 + 4 + 2 + 2 + 8 + 16 + 1;
     public const int MonitorSize = 17;
     public const int MaxMonitors = 16;
@@ -273,6 +283,13 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
         if (p.Length < o + versionLen) return null;
         string appVersion = Encoding.UTF8.GetString(p, o, versionLen);
         o += versionLen;
+        if (p.Length < o + 3) return null;
+        ushort udpPort = BinaryPrimitives.ReadUInt16LittleEndian(p.AsSpan(o));
+        int udpCount = p[o + 2];
+        o += 3;
+        if (p.Length < o + udpCount * 4) return null;
+        var udpAddrs = new IPAddress[udpCount];
+        for (int i = 0; i < udpCount; i++, o += 4) udpAddrs[i] = new IPAddress(p.AsSpan(o, 4));
         return new HelloInfo(
             p[1] != 0,
             new Point(BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(2)), BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(6))),
@@ -281,23 +298,27 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
             p.AsSpan(22, 16).ToArray(),
             monitors,
             Encoding.UTF8.GetString(p, o, p.Length - o),
-            appVersion);
+            appVersion,
+            udpPort,
+            udpAddrs);
     }
 }
 
 /// <summary>
 /// AES-GCM framing. Packet = counter(8, big-endian) || ciphertext || tag(16).
-/// Nonce = direction(1) || 0(3) || counter(8). Counters start from the wall clock so they
+/// Nonce = direction(1) || channel(1) || 0(2) || counter(8). Counters start from the wall clock so they
 /// stay unique across restarts. The receiver keeps a sliding window of the last 64 counters:
 /// packets may arrive slightly out of order (BLE callbacks run concurrently) but never twice,
 /// and anything older than the window is dropped.
-/// The direction byte is 1 for frames sent by the BLE central and 2 for the peripheral.
+/// The direction byte is 1 for frames sent by the BLE central and 2 for the peripheral. The channel byte is 0
+/// for BLE and 1 for the UDP pixel path: same key, but two independent counter streams must never share a
+/// nonce space under GCM, and each path keeps its own replay window since they reorder against each other.
 /// </summary>
 public sealed class Crypto : IDisposable
 {
     private static readonly byte[] Salt = Encoding.ASCII.GetBytes("Glissando-v1");
     private readonly AesGcm _aes;
-    private readonly byte _dirSend, _dirRecv;
+    private readonly byte _dirSend, _dirRecv, _channel;
     private long _sendCounter;
     private long _highest = -1;   // highest counter accepted so far
     private ulong _window;        // bit i set = counter (_highest - i) has been accepted
@@ -306,8 +327,9 @@ public sealed class Crypto : IDisposable
 
     public const int Overhead = 8 + 16;
 
-    public Crypto(string passphrase, bool isCentral)
+    public Crypto(string passphrase, bool isCentral, byte channel = 0)
     {
+        _channel = channel;
         var key = Rfc2898DeriveBytes.Pbkdf2(passphrase, Salt, 200_000, HashAlgorithmName.SHA256, 32);
         _aes = new AesGcm(key, 16);
         _dirSend = isCentral ? (byte)1 : (byte)2;
@@ -322,6 +344,7 @@ public sealed class Crypto : IDisposable
         BinaryPrimitives.WriteInt64BigEndian(packet, counter);
         Span<byte> nonce = stackalloc byte[12];
         nonce[0] = _dirSend;
+        nonce[1] = _channel;
         BinaryPrimitives.WriteInt64BigEndian(nonce[4..], counter);
         lock (_gate)
             _aes.Encrypt(nonce, plain, packet.AsSpan(8, plain.Length), packet.AsSpan(8 + plain.Length, 16));
@@ -335,6 +358,7 @@ public sealed class Crypto : IDisposable
         long counter = BinaryPrimitives.ReadInt64BigEndian(packet);
         Span<byte> nonce = stackalloc byte[12];
         nonce[0] = _dirRecv;
+        nonce[1] = _channel;
         BinaryPrimitives.WriteInt64BigEndian(nonce[4..], counter);
         var body = new byte[packet.Length - Overhead];
         lock (_gate)

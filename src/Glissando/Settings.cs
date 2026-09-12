@@ -41,6 +41,11 @@ public sealed class Settings
     /// mirror stops, or as soon as someone clicks or types on this PC.</summary>
     public bool HideMirroredWindow { get; set; } = true;
 
+    /// <summary>Carry the mirrored window's pixels over UDP on a shared IP network when the two PCs can reach
+    /// each other that way (addresses exchanged over BLE; no configuration, no firewall rule). BLE remains the
+    /// control path and carries the pixels itself when this is off or the network does not connect.</summary>
+    public bool UdpMirror { get; set; } = true;
+
     /// <summary>After a few minutes without input, ping only every 10 s so the BLE link can idle (first move after that is slower).</summary>
     public bool PowerSaveWhenIdle { get; set; }
 

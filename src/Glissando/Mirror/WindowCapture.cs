@@ -154,6 +154,30 @@ internal static class WindowCapture
         return ms.ToArray();
     }
 
+    /// <summary>Encode many tiles of one captured frame in parallel, straight from its 32bpp pixel buffer: each
+    /// tile is a Bitmap over the shared memory (no copy, no Clone), and GDI+ encodes separate Bitmap objects on
+    /// separate threads without complaint. Serial Clone+Save managed ~360 tiles/s; this scales with the cores.</summary>
+    public static byte[][] EncodeTiles(byte[] pixels, int stride, IReadOnlyList<Rectangle> regions, long quality)
+    {
+        _jpeg ??= ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == ImageFormat.Jpeg.Guid);
+        var result = new byte[regions.Count][];
+        if (regions.Count == 0) return result;
+        var handle = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+        try
+        {
+            IntPtr basePtr = handle.AddrOfPinnedObject();
+            var opts = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, Environment.ProcessorCount - 2) };
+            Parallel.For(0, regions.Count, opts, i =>
+            {
+                var r = regions[i];
+                using var tile = new Bitmap(r.Width, r.Height, stride, PixelFormat.Format32bppArgb, basePtr + r.Y * stride + r.X * 4);
+                result[i] = EncodeJpeg(tile, quality);
+            });
+        }
+        finally { handle.Free(); }
+        return result;
+    }
+
     /// <summary>Union rectangle of all <paramref name="tile"/>-sized blocks whose 32bpp pixels differ between
     /// two same-size frames, or null if identical.</summary>
     public static Rectangle? ChangedBox(byte[] a, byte[] b, int stride, int w, int h, int tile)

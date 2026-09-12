@@ -62,6 +62,14 @@ public sealed class Session : IDisposable
     private Mirror.MirrorSender? _mirrorSender;
     private Crypto? _crypto;
 
+    // The UDP pixel path (see UdpPixelLink): optional, beside BLE, with a crypto of its own nonce space.
+    private readonly UdpPixelLink? _udp;
+    private Crypto? _cryptoUdp;
+    private long _lastUdpTick;
+
+    /// <summary>True while mirror pixels can travel over the shared IP network instead of BLE.</summary>
+    public bool UdpUp => _udp?.Up ?? false;
+
     /// <summary>Raised on the receive thread with each incoming window-mirroring frame; the tray marshals it to
     /// the UI thread and into a MirrorReceiver.</summary>
     public event Action<Frame>? MirrorReceived;
@@ -76,7 +84,8 @@ public sealed class Session : IDisposable
     public void StartMirror(IntPtr hwnd)
     {
         StopMirror();
-        _mirrorSender = new Mirror.MirrorSender(hwnd, Enqueue, () => Volatile.Read(ref _queued), slowLink: !_channel.IsCentral, hide: _s.HideMirroredWindow);
+        _mirrorSender = new Mirror.MirrorSender(hwnd, Enqueue, () => Volatile.Read(ref _queued), slowLink: !_channel.IsCentral, hide: _s.HideMirroredWindow,
+            udpUp: () => UdpUp, sendUdp: SendUdp);
         _mirrorSender.Start();
         Log.Info($"mirror: started for window {hwnd:X}");
         StateChanged?.Invoke();
@@ -115,6 +124,43 @@ public sealed class Session : IDisposable
         // handover (the peer has actually stopped) stays responsive.
         _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !LocalLocked && !PeerLocked
             && !_injector.Active && !PeerRecentlyInjected();
+
+        if (s.UdpMirror)
+        {
+            try
+            {
+                _udp = new UdpPixelLink();
+                _udp.Received += OnUdpReceived;
+                _udp.UpChanged += up => { if (!up) Log.Info("udp: mirror pixels back on BLE"); StateChanged?.Invoke(); };
+                Log.Info($"udp: pixel path listening on port {_udp.LocalPort}");
+            }
+            catch (Exception ex) { Log.Warn("udp: pixel path unavailable: " + ex.Message); _udp = null; }
+        }
+    }
+
+    /// <summary>A pixel frame for the peer: over UDP when that path is up, else queued on BLE like everything.</summary>
+    private void SendUdp(Frame f)
+    {
+        var c = _cryptoUdp;
+        if (c == null || _udp == null || !_udp.Up || !_udp.Send(c.Seal(f.Encode()))) Enqueue(f);
+    }
+
+    /// <summary>A datagram on the UDP path: only what decrypts with the session key counts, and the first one
+    /// from an endpoint makes that endpoint the peer. Probes carry nothing; everything else is an app frame.</summary>
+    private void OnUdpReceived(byte[] packet, System.Net.IPEndPoint from)
+    {
+        var c = _cryptoUdp;
+        if (c == null || _udp == null) return;
+        if (!c.Open(packet, out var plain)) return;
+        if (!Frame.TryDecode(plain, out var f)) return;
+        _udp.Confirm(from);
+        _lastPeer = Stopwatch.GetTimestamp();
+        if (f.Type == FrameType.UdpProbe) return;
+        lock (_rxGate)
+        {
+            if (IsDuplicate(f)) return;
+            HandleApp(f);
+        }
     }
 
     private bool PeerRecentlyInjected()
@@ -164,6 +210,7 @@ public sealed class Session : IDisposable
         sb.AppendLine($"Transport: {TransportStatus}; linked={Linked} role={(Linked ? (_channel.IsCentral ? "central" : "peripheral") : "-")} authenticated={Authenticated} peer='{PeerName}' rtt={RttMs:F0} ms");
         sb.AppendLine($"State: controlling={Controlling} controlled={Controlled} locked={Locked} sessionLocked={LocalLocked} peerLocked={PeerLocked} powerSaving={_powerSaving} peerPowerSaving={PeerPowerSaving} idle={Native.IdleMs() / 1000} s");
         sb.AppendLine($"Counters: movesForwarded={Interlocked.Read(ref _capture.MovesForwarded)} rejectedPackets={Rejected} queued={Volatile.Read(ref _queued)} dedupSeen={_dedupSeen.Count}");
+        sb.AppendLine(_udp == null ? "UDP pixel path: off" : $"UDP pixel path: port {_udp.LocalPort} up={_udp.Up} peer={_udp.Peer?.ToString() ?? "-"} sent={_udp.SentBytes / 1024} kB received={_udp.ReceivedBytes / 1024} kB");
         sb.AppendLine($"Settings: ble={_s.Ble} capture={_s.CaptureEnabled} clipboard={_s.SyncClipboard} hideCursor={_s.HideCursorWhileControlling} powerSave={_s.PowerSaveWhenIdle} keepalive={_s.KeepaliveMs} timeout={_s.PeerTimeoutMs} passphrase={(string.IsNullOrEmpty(_s.Passphrase) ? "(empty)" : $"set, {_s.Passphrase.Length} chars")} placementUpdated={_s.PlacementUpdated}");
         sb.AppendLine($"Layout: peerOrigin={layout.PeerOrigin} virtualScreen={Layout.MyVirtualScreen()}");
         foreach (var m in layout.Mine) sb.AppendLine($"  mine #{m.Number}: {m.Bounds}");
@@ -304,6 +351,9 @@ public sealed class Session : IDisposable
             var old = _crypto;
             _crypto = new Crypto(_s.Passphrase, _channel.IsCentral);
             old?.Dispose();
+            var oldU = _cryptoUdp;
+            _cryptoUdp = new Crypto(_s.Passphrase, _channel.IsCentral, channel: 1);
+            oldU?.Dispose();
             _lastPeer = Stopwatch.GetTimestamp();
             SendHello();
         }
@@ -318,7 +368,8 @@ public sealed class Session : IDisposable
     {
         RandomNumberGenerator.Fill(_myNonce);
         var layout = _capture.Layout;
-        var hello = Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version));
+        var hello = Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version,
+            (ushort)(_udp?.LocalPort ?? 0), _udp != null ? UdpPixelLink.LocalAddresses() : null));
         // The monitor layout travels in Hello. A display or settings change mid-session sends one Hello, and on
         // this lossy link a single packet can be lost, leaving the peer with a stale arrangement -- the two
         // dialogs then disagree and a corner monitor becomes unreachable. Send a few copies so the update
@@ -395,6 +446,7 @@ public sealed class Session : IDisposable
                 Log.Info($"hello from {hello.Name} [{hello.AppVersion}]: capture={hello.CaptureEnabled} ourOriginThere={hello.PeerOrigin} screen={hello.Screen.Width}x{hello.Screen.Height} monitors={hello.Monitors.Length} updated={hello.PlacementUpdated}");
                 if (hello.AppVersion != Program.Version) Log.Warn($"build mismatch: this PC {Program.Version}, {hello.Name} {hello.AppVersion}");
                 AdoptPeerInfo(hello);
+                if (_udp != null && hello.UdpPort != 0 && hello.UdpAddresses is { Length: > 0 } ua) _udp.SetCandidates(ua, hello.UdpPort);
                 Enqueue(Frame.HelloAck(hello.Nonce));
                 if (!Authenticated && Stopwatch.GetTimestamp() - _lastHello > Stopwatch.Frequency) SendHello();
                 break;
@@ -669,6 +721,15 @@ public sealed class Session : IDisposable
                 // While controlling, tell the other PC so it stays active even when the mouse is still.
                 if (_capture.Remote) Enqueue(new Frame(FrameType.ControlAlive, []));
 
+                // The UDP pixel path: once a second, knock on the peer's candidates until one answers, then keep
+                // the hole open; and let the path lapse after a few seconds of silence. Sealed like any frame,
+                // so a stray datagram from elsewhere can never bring it up.
+                if (_udp != null && Authenticated && _cryptoUdp is { } cu && now - _lastUdpTick > Stopwatch.Frequency)
+                {
+                    _lastUdpTick = now;
+                    _udp.Tick(cu.Seal(new Frame(FrameType.UdpProbe, []).Encode()));
+                }
+
                 // Keep the round trip fresh while control is active, so the diagnostic below samples the live
                 // latency rather than the last idle ping (mouse moves keep _lastSend fresh, so the normal
                 // keepalive ping rarely fires while controlling). A ping is a few bytes at 2 Hz.
@@ -792,7 +853,9 @@ public sealed class Session : IDisposable
         _cts.Cancel();
         _queue.Writer.TryComplete();
         _channel.Dispose();
+        _udp?.Dispose();
         _crypto?.Dispose();
+        _cryptoUdp?.Dispose();
     }
 
     /// <summary>Wait, at most maxMs, for the sender loop to hand every queued frame to the channel. _queued

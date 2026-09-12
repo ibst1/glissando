@@ -107,8 +107,10 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _session = new Session(settings, channel, _capture, _injector, this);
         _session.StateChanged += () => _window.BeginInvoke(UpdateTray);
         _session.SettingsChanged += () => _window.BeginInvoke(() => _openForm?.Reload(_settings, _session.PeerName));
-        // Incoming window-mirroring frames arrive on the receive thread; paint them on the UI thread.
-        _session.MirrorReceived += f => _window.BeginInvoke(() => _mirrorRx.Handle(f));
+        // Incoming window-mirroring frames arrive on the receive threads; the receiver reassembles and decodes
+        // there and asks for the UI thread only to paint.
+        _mirrorRx.Ui = a => { try { _window.BeginInvoke(a); } catch (Exception ex) { Log.Warn("mirror ui: " + ex.Message); } };
+        _session.MirrorReceived += f => _mirrorRx.Handle(f);
         _mirrorRx.Send = f => _session.SendMirrorInput(f);
 
         // After sleep the Bluetooth stack often needs a nudge.
