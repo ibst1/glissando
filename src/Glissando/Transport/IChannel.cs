@@ -25,6 +25,15 @@ public interface IChannel : IDisposable
 
     /// <summary>Drops the current link so the run loop establishes a new one.</summary>
     void Reconnect();
+
+    /// <summary>The machine is about to sleep: let go of the radio cleanly - stop advertising, release the GATT
+    /// server, drop the link - so the Bluetooth stack does not carry a live LE server through suspend. Left in
+    /// place across a night's sleep, the Intel stack woke with its GATT server dead (2026-09-13), and only a
+    /// restart of Windows revived it. Default: nothing.</summary>
+    void Sleep() { }
+
+    /// <summary>The machine woke: start over from scratch. Default: nothing.</summary>
+    void Wake() { }
 }
 
 public static class BleIds

@@ -24,6 +24,10 @@ internal sealed class MirrorTarget
 
     public MirrorTarget(IntPtr hwnd) => _hwnd = hwnd;
 
+    /// <summary>The picture the viewer sees is the window's VISIBLE frame (GPU capture), not GetWindowRect with
+    /// its invisible borders, so a mirror pixel maps from the visible bounds' corner.</summary>
+    public volatile bool UseVisibleBounds;
+
     public void Apply(Frame f)
     {
         lock (_gate)
@@ -62,6 +66,13 @@ internal sealed class MirrorTarget
     {
         if (!IsWindow(_hwnd)) return false;
         if (raise) Raise();
+        if (UseVisibleBounds)
+        {
+            var vb = WindowCapture.VisibleBounds(_hwnd);
+            if (vb.IsEmpty) return false;
+            Native.MoveCursorAbsolute(vb.Left + x, vb.Top + y);
+            return true;
+        }
         if (!GetWindowRect(_hwnd, out var r)) return false;
         Native.MoveCursorAbsolute(r.Left + x, r.Top + y);
         return true;

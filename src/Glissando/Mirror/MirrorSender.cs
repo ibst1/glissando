@@ -51,6 +51,7 @@ internal sealed class MirrorSender
     private readonly Action<Frame> _sendUdp;
     private readonly MirrorTarget _target;
     private CancellationTokenSource? _cts;
+    private GpuCapture? _gpu;
 
     /// <param name="send">The BLE path: control frames always, pixels when UDP is down.</param>
     /// <param name="udpUp">Whether the UDP pixel path is up right now (re-read every frame).</param>
@@ -103,7 +104,16 @@ internal sealed class MirrorSender
 
     private void Loop(CancellationToken ct)
     {
-        byte[]? prev = null;
+        _gpu = GpuCapture.TryCreate(_hwnd);
+        _target.UseVisibleBounds = _gpu != null;
+        Log.Info(_gpu != null ? "mirror tx: capture via Windows.Graphics.Capture (GPU)" : "mirror tx: capture via PrintWindow");
+        try { LoopCore(ct); }
+        finally { _gpu?.Dispose(); _gpu = null; }
+    }
+
+    private void LoopCore(CancellationToken ct)
+    {
+        byte[]? prev = null, spare = null;
         int prevStride = 0, prevW = 0, prevH = 0, lastW = -1, lastH = -1, lastTile = 0, refreshCursor = 0;
         ushort frameId = 0;
         var logClock = Stopwatch.StartNew();
@@ -128,34 +138,54 @@ internal sealed class MirrorSender
                 lastUdp = udp; pathLogged = true;
                 Log.Info(udp ? "mirror tx: pixels via UDP (shared network)" : "mirror tx: pixels via BLE");
             }
+            Bitmap? bmp = null;
             try
             {
                 long s0 = Stopwatch.GetTimestamp();
                 bool hidden = Hidden;
-                using var bmp = WindowCapture.Capture(_hwnd, hidden, out bool fromScreen);
-                if (bmp == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(); break; }
-                string mode = hidden ? "hidden" : fromScreen ? "screen" : "print";
+                byte[] cur; int w, h, stride; bool fresh; string mode;
+                if (_gpu != null)
+                {
+                    // GPU: a frame only when the window changed; otherwise nothing new (cur = prev) and the
+                    // heal below still gets its turn. TryGetFrame already waited up to one interval.
+                    if (_gpu.Closed || WindowCapture.SizeOf(_hwnd) == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(); break; }
+                    var buf = spare;
+                    fresh = _gpu.TryGetFrame(ref buf, interval, out w, out h, out stride);
+                    if (fresh) { cur = buf!; spare = prev; WindowCapture.OverlayPopupsOnto(cur, stride, w, h, _hwnd); }
+                    else if (prev != null) { cur = prev; w = prevW; h = prevH; stride = prevStride; }
+                    else continue;
+                    mode = "gpu";
+                }
+                else
+                {
+                    bmp = WindowCapture.Capture(_hwnd, hidden, out bool fromScreen);
+                    if (bmp == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(); break; }
+                    mode = hidden ? "hidden" : fromScreen ? "screen" : "print";
+                    w = bmp.Width; h = bmp.Height;
+                    cur = WindowCapture.Pixels(bmp, out stride);
+                    fresh = true;
+                }
                 if (mode != lastMode)
                 {
                     lastMode = mode;
                     Log.Info(mode switch
                     {
+                        "gpu" => "mirror tx: capturing via Windows.Graphics.Capture (the window's own surface, hidden or not; popups overlaid from the screen)",
                         "hidden" => "mirror tx: window hidden here; capturing via PrintWindow, popups overlaid from the screen",
                         "screen" => "mirror tx: capturing from the screen (window in front; popups show)",
                         _ => $"mirror tx: capturing via PrintWindow (window not in front; foreground is \"{WindowCapture.Title(WindowCapture.Foreground())}\")",
                     });
                 }
-                int w = bmp.Width, h = bmp.Height;
 
                 if (w != lastW || h != lastH)
                 {
                     for (int i = 0; i < 3; i++) _send(Frame.MirrorBegin(w, h)); // redundant: the size must arrive
-                    lastW = w; lastH = h; prev = null; refreshCursor = 0;       // a fresh heal pass for the new size
+                    lastW = w; lastH = h; refreshCursor = 0;                    // a fresh heal pass for the new size
+                    if (!fresh || !ReferenceEquals(cur, prev)) prev = null;
                     Log.Info($"mirror tx: begin {w}x{h}");
                 }
                 if (tile != lastTile) { lastTile = tile; refreshCursor = 0; }
 
-                var cur = WindowCapture.Pixels(bmp, out int stride);
                 long s1 = Stopwatch.GetTimestamp();
                 bool sameShape = prev != null && prevW == w && prevH == h && prevStride == stride;
                 bool first = !sameShape;
@@ -173,7 +203,7 @@ internal sealed class MirrorSender
                 var fulls = new List<bool>();
                 int budget = udp ? UdpFrameBytes : _slowLink ? SlowFrameBytes : FastFrameBytes;
                 int planned = 0;
-                for (int idx = 0; idx < tileCount && !ct.IsCancellationRequested; idx++)
+                for (int idx = 0; (first || fresh) && idx < tileCount && !ct.IsCancellationRequested; idx++)
                 {
                     var r = RegionOf(idx);
                     if (!(first || !WindowCapture.TileEqual(prev!, cur, stride, r.Left, r.Top, r.Right, r.Bottom)))
@@ -229,6 +259,7 @@ internal sealed class MirrorSender
                 prev = cur; prevStride = stride; prevW = w; prevH = h;
             }
             catch (Exception ex) { Log.Warn("mirror capture: " + ex.Message); }
+            finally { bmp?.Dispose(); }
 
             if (logClock.ElapsedMilliseconds >= 2000)
             {

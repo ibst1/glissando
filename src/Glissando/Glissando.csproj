@@ -17,7 +17,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Roughly halves the self-contained single-file exe; costs a little at start-up. -->
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <!-- build.ps1 sets InformationalVersion to 0.3.N+shorthash itself; stop the SDK appending the full SHA. -->
@@ -27,6 +27,10 @@
   <ItemGroup>
     <!-- build.ps1 passes -p:BuildTime; Program.Version shows it next to the version. -->
     <AssemblyMetadata Include="BuildTime" Value="$(BuildTime)" Condition="'$(BuildTime)' != ''" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
   </ItemGroup>
 
 </Project>

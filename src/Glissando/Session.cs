@@ -234,12 +234,24 @@ public sealed class Session : IDisposable
         StateChanged?.Invoke();
     }
 
-    /// <summary>The machine woke up: Bluetooth state is suspect, so drop and re-establish the link.</summary>
+    /// <summary>The machine is about to sleep: release the peer and the radio cleanly (see IChannel.Sleep).
+    /// Must be quick - Windows gives suspend handlers a couple of seconds.</summary>
+    public void Suspend()
+    {
+        Log.Info("system suspending; releasing the link and the radio");
+        SetAuthenticated(false);
+        RttMs = 0;
+        try { _channel.Sleep(); } catch (Exception ex) { Log.Warn("sleep: " + ex.Message); }
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>The machine woke up: Bluetooth state is suspect, so start the transport over and re-establish.</summary>
     public void Resume()
     {
         Log.Info("system resumed; re-establishing the link");
         SetAuthenticated(false);
         RttMs = 0;
+        try { _channel.Wake(); } catch (Exception ex) { Log.Warn("wake: " + ex.Message); }
         StateChanged?.Invoke();
         _ = ResumeRecoveryAsync();
     }
@@ -249,6 +261,8 @@ public sealed class Session : IDisposable
     /// seconds for about half a minute, until it is back.</summary>
     private async Task ResumeRecoveryAsync()
     {
+        // The transport is starting from scratch after Wake(); give that 8 s before nudging it.
+        try { await Task.Delay(8000, _cts.Token); } catch (OperationCanceledException) { return; }
         for (int i = 0; i < 12; i++)
         {
             if (_cts.IsCancellationRequested || (Linked && Authenticated)) return;

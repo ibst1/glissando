@@ -113,10 +113,13 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _session.MirrorReceived += f => _mirrorRx.Handle(f);
         _mirrorRx.Send = f => _session.SendMirrorInput(f);
 
-        // After sleep the Bluetooth stack often needs a nudge.
+        // Let go of the radio before sleep and start over after it: a live GATT server carried through
+        // suspend is what left the Bluetooth stack with a dead LE server (2026-09-13). Suspend runs inline
+        // (the handler has a couple of seconds); Resume is marshalled like everything else.
         _powerHandler = (_, e) =>
         {
-            if (e.Mode == Microsoft.Win32.PowerModes.Resume) _window.BeginInvoke(() => _session.Resume());
+            if (e.Mode == Microsoft.Win32.PowerModes.Suspend) _session.Suspend();
+            else if (e.Mode == Microsoft.Win32.PowerModes.Resume) _window.BeginInvoke(() => _session.Resume());
         };
         Microsoft.Win32.SystemEvents.PowerModeChanged += _powerHandler;
 
@@ -132,7 +135,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         UpdateTray();
     }
 
-    private bool _versionWarned;
+    private bool _versionWarned, _stuckWarned;
 
     /// <summary>Remember the front application window (not ours, visible, titled, of a real size), so mirroring
     /// can target the window the user was using rather than whatever tiny window has focus at menu time.</summary>
@@ -202,6 +205,14 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             _tray.ShowBalloonTip(8000, "Glissando", $"The other PC runs another Glissando version. Install {Program.Version} there too.", ToolTipIcon.Warning);
         }
         if (_session.Authenticated) _versionWarned = false;
+        // The LE stack is stuck (advertising never starts): say what to do, once per episode.
+        bool stuck = _session.TransportStatus.Contains("advertising will not start");
+        if (stuck && !_stuckWarned)
+        {
+            _stuckWarned = true;
+            _tray.ShowBalloonTip(15000, "Glissando", "Windows' Bluetooth LE stack is stuck - it happens after sleep. Turn Bluetooth off and on; if the link is not back within a minute, restart Windows.", ToolTipIcon.Warning);
+        }
+        if (_session.Linked) _stuckWarned = false;
         // Windows truncates a long tray tooltip on hover, so the tip is a short summary; the full multi-line
         // status lives in the first menu row (_status.Text above), which has no such limit.
         // Build id first so it survives the 63-char trim; the live status fills the rest.

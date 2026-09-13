@@ -17,10 +17,66 @@ public sealed class BleAutoChannel : IChannel
     public event Action<string>? StatusChanged;
 
     private IChannel? _active;
+    private CancellationTokenSource? _runCts;   // cancels the current RunOnceAsync (sleep)
+    private volatile bool _asleep;
+    private readonly SemaphoreSlim _wake = new(0);
     public bool IsLinked => _active?.IsLinked ?? false;
     public bool IsCentral => _active is BleCentralChannel;
 
+    /// <summary>Runs the decision loop for the life of the session. Anything the Bluetooth stack throws --
+    /// GATT setup or scanning refusing while the stack is not ready, or after a night's sleep -- is logged,
+    /// shown in the tray and retried, instead of ending the loop in silence with the tray stuck on "starting"
+    /// (2026-09-13: no advertising, no error, no link, until the app was restarted).</summary>
     public async Task RunAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            if (_asleep)
+            {
+                // Everything is torn down; wait for Wake(). No radio work at all while the machine sleeps.
+                try { await _wake.WaitAsync(ct); } catch (OperationCanceledException) { return; }
+                continue;
+            }
+            var run = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _runCts = run;
+            try
+            {
+                await RunOnceAsync(run.Token);
+                if (ct.IsCancellationRequested) return;
+                if (!_asleep) Log.Warn("BLE auto: run loop ended; restarting in 5 s");
+            }
+            catch (OperationCanceledException) { if (ct.IsCancellationRequested) return; }
+            catch (Exception ex)
+            {
+                Log.Error("BLE auto: " + ex.Message + " - retrying in 5 s");
+                StatusChanged?.Invoke("BLE error: " + Brief(ex.Message) + " (retrying)");
+            }
+            finally { _runCts = null; run.Dispose(); }
+            if (_asleep) continue;
+            try { await Task.Delay(5000, ct); } catch (OperationCanceledException) { return; }
+        }
+    }
+
+    public void Sleep()
+    {
+        if (_asleep) return;
+        _asleep = true;
+        Log.Info("BLE auto: sleeping - stopping advertising, releasing the GATT server and the link");
+        StatusChanged?.Invoke("asleep");
+        try { _runCts?.Cancel(); } catch { }
+    }
+
+    public void Wake()
+    {
+        if (!_asleep) return;
+        _asleep = false;
+        Log.Info("BLE auto: awake - starting over");
+        _wake.Release();
+    }
+
+    private static string Brief(string s) => s.Length > 60 ? s[..60] + "..." : s;
+
+    private async Task RunOnceAsync(CancellationToken ct)
     {
         var adapter = await BluetoothAdapter.GetDefaultAsync();
         if (adapter == null) { StatusChanged?.Invoke("BLE error: no adapter"); Log.Error("no Bluetooth adapter"); return; }
@@ -35,15 +91,67 @@ public sealed class BleAutoChannel : IChannel
 
         if (adapter.IsPeripheralRoleSupported)
         {
-            p = new BlePeripheralChannel();
-            detachP = Attach(p, up =>
-            {
-                // While someone is connected to us there is nothing to decide; resume scanning if they leave.
-                try { if (up) watcher.Stop(); else watcher.Start(); } catch { }
-            });
-            _active = p;
             pCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            pTask = p.RunAsync(pCts.Token);
+            var pToken = pCts.Token;
+            void StartPeripheral()
+            {
+                detachP?.Invoke();
+                p = new BlePeripheralChannel();
+                detachP = Attach(p, up =>
+                {
+                    // While someone is connected to us there is nothing to decide; resume scanning if they leave.
+                    try { if (up) watcher.Stop(); else watcher.Start(); } catch { }
+                });
+                _active = p;
+            }
+            StartPeripheral();
+            // The peripheral half, kept alive: a start that fails (Fail() returns, or the stack throws) is retried
+            // after 5 s; a start that HANGS in one of its awaits (seen once with the stack out of sorts) is given
+            // 45 s, warned about at 15, then abandoned for a fresh instance -- the stuck one is left to the GC.
+            pTask = Task.Run(async () =>
+            {
+                while (!pToken.IsCancellationRequested)
+                {
+                    var cur = p!;
+                    Task run;
+                    try { run = cur.RunAsync(pToken); }
+                    catch (Exception ex) { run = Task.FromException(ex); }
+                    var warned = false;
+                    var startedAt = Stopwatch.StartNew();
+                    while (true)
+                    {
+                        var done = await Task.WhenAny(run, Task.Delay(1000, pToken).ContinueWith(_ => { }));
+                        if (pToken.IsCancellationRequested) return;
+                        if (done == run) break;
+                        if (cur.IsAdvertising || cur.IsLinked) { startedAt.Restart(); warned = false; continue; }
+                        if (!warned && startedAt.ElapsedMilliseconds > 15000)
+                        {
+                            warned = true;
+                            Log.Warn("BLE peripheral: still not advertising after 15 s (Bluetooth stack stuck? toggling Bluetooth off and on helps)");
+                            StatusChanged?.Invoke("BLE error: advertising will not start (Bluetooth stuck?)");
+                        }
+                        if (startedAt.ElapsedMilliseconds > 45000)
+                        {
+                            Log.Warn("BLE peripheral: start hung for 45 s; abandoning it and starting a fresh one");
+                            run = Task.CompletedTask;
+                            break;
+                        }
+                    }
+                    if (run.IsFaulted)
+                    {
+                        var ex = run.Exception?.GetBaseException();
+                        if (ex is not OperationCanceledException)
+                        {
+                            Log.Error("BLE peripheral: " + ex?.Message + " - retrying in 5 s");
+                            StatusChanged?.Invoke("BLE error: " + Brief(ex?.Message ?? "?") + " (retrying)");
+                        }
+                    }
+                    else if (!pToken.IsCancellationRequested) Log.Warn("BLE peripheral: stopped; retrying in 5 s");
+                    try { await Task.Delay(5000, pToken); } catch (OperationCanceledException) { return; }
+                    if (pToken.IsCancellationRequested) return;
+                    StartPeripheral();
+                }
+            });
         }
         else
         {
@@ -63,7 +171,17 @@ public sealed class BleAutoChannel : IChannel
             else
                 Log.Info($"BLE auto: peer {e.BluetoothAddress:X12} seen; it has the lower address and should connect to us");
         };
-        watcher.Start();
+        // Scanning can be refused while the stack is not ready ("device not ready"): log, say so, try again.
+        while (true)
+        {
+            try { watcher.Start(); break; }
+            catch (Exception ex)
+            {
+                Log.Error("BLE scan: " + ex.Message + " - retrying in 5 s");
+                StatusChanged?.Invoke("BLE error: scanning refused (" + Brief(ex.Message) + "), retrying");
+                await Task.Delay(5000, ct);
+            }
+        }
         StatusChanged?.Invoke(p != null ? "advertising, scanning" : "scanning");
 
         ulong peer;
@@ -72,8 +190,10 @@ public sealed class BleAutoChannel : IChannel
             try { peer = await decision.Task; }
             catch (OperationCanceledException)
             {
+                // Session end or Sleep(): stop scanning, stop advertising and release the GATT server for real.
                 try { watcher.Stop(); } catch { }
-                if (p != null) { pCts!.Cancel(); try { await pTask!; } catch { } }
+                if (p != null) { pCts!.Cancel(); try { await pTask!; } catch { } detachP?.Invoke(); try { p.Dispose(); } catch { } }
+                _active = null;
                 return;
             }
         }
@@ -90,9 +210,10 @@ public sealed class BleAutoChannel : IChannel
         }
 
         var c = new BleCentralChannel();
-        Attach(c, null);
+        var detachC = Attach(c, null);
         _active = c;
-        await c.RunAsync(ct);
+        try { await c.RunAsync(ct); }
+        finally { detachC(); try { c.Dispose(); } catch { } _active = null; }
     }
 
     private Action Attach(IChannel ch, Action<bool>? onLink)

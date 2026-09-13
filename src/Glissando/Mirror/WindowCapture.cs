@@ -104,10 +104,9 @@ internal static class WindowCapture
     private const int GWL_STYLE = -16;
     private const long WS_POPUP = 0x80000000;
 
-    /// <summary>Copy the process's visible popup windows (menus, drop-downs, tooltips, dialogs: WS_POPUP, above
-    /// their owner) that overlap the window rectangle from the screen onto the capture, bottom-most first so the
-    /// z-order holds. Only the part inside the window rectangle, which is all the capture covers.</summary>
-    private static void OverlayPopups(IntPtr hwnd, IntPtr hdc, RECT r)
+    /// <summary>The visible popup windows of the window's process (menus, drop-downs, tooltips, dialogs: WS_POPUP)
+    /// clipped to the rectangle r, screen coordinates; top-most first as EnumWindows lists them.</summary>
+    private static List<RECT> FindPopups(IntPtr hwnd, RECT r)
     {
         uint pid = ProcessId(hwnd);
         var popups = new List<RECT>();
@@ -121,6 +120,48 @@ internal static class WindowCapture
             if (right > left && bottom > top) popups.Add(new RECT { Left = left, Top = top, Right = right, Bottom = bottom });
             return true;
         }, IntPtr.Zero);
+        return popups;
+    }
+
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT rect, int size);
+
+    /// <summary>The window's visible frame in screen pixels - what the compositor shows and what
+    /// Windows.Graphics.Capture delivers - without the invisible resize borders (7-8 px a side) that
+    /// GetWindowRect includes on Windows 10/11. Falls back to GetWindowRect.</summary>
+    public static Rectangle VisibleBounds(IntPtr hwnd)
+    {
+        const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+        if (DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out var r, Marshal.SizeOf<RECT>()) == 0 && r.Right > r.Left && r.Bottom > r.Top)
+            return Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
+        return GetWindowRect(hwnd, out var w) ? Rectangle.FromLTRB(w.Left, w.Top, w.Right, w.Bottom) : Rectangle.Empty;
+    }
+
+    /// <summary>Copy the app's popups from the screen onto a 32bpp buffer holding the window's visible bounds
+    /// (a GPU-captured frame, which has only the window's own surface). False when there are none.</summary>
+    public static bool OverlayPopupsOnto(byte[] pixels, int stride, int w, int h, IntPtr hwnd)
+    {
+        var vb = VisibleBounds(hwnd);
+        if (vb.IsEmpty) return false;
+        var r = new RECT { Left = vb.Left, Top = vb.Top, Right = vb.Left + w, Bottom = vb.Top + h };
+        if (FindPopups(hwnd, r).Count == 0) return false;
+        var handle = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+        try
+        {
+            using var bmp = new Bitmap(w, h, stride, PixelFormat.Format32bppArgb, handle.AddrOfPinnedObject());
+            using var g = Graphics.FromImage(bmp);
+            IntPtr hdc = g.GetHdc();
+            try { OverlayPopups(hwnd, hdc, r); } finally { g.ReleaseHdc(hdc); }
+        }
+        finally { handle.Free(); }
+        return true;
+    }
+
+    /// <summary>Copy the process's visible popup windows (menus, drop-downs, tooltips, dialogs: WS_POPUP, above
+    /// their owner) that overlap the window rectangle from the screen onto the capture, bottom-most first so the
+    /// z-order holds. Only the part inside the window rectangle, which is all the capture covers.</summary>
+    private static void OverlayPopups(IntPtr hwnd, IntPtr hdc, RECT r)
+    {
+        var popups = FindPopups(hwnd, r);
         if (popups.Count == 0) return;
         IntPtr screen = GetDC(IntPtr.Zero);
         try

@@ -137,6 +137,22 @@ the window then takes about a second to finish redrawing a large change instead
 of freezing. Menus, drop-downs and dialogs show too, because while the source
 window is in front its picture is taken from the screen rather than from the
 window alone. The tiles ride the same AES-GCM channel as all other frames.
+Where the two PCs share an IP network (the home Wi-Fi), the pixels do not go
+over Bluetooth at all: both sides open a UDP port, exchange addresses in the
+BLE handshake, and send to each other at once. Windows Firewall admits UDP that
+answers a flow the PC opened itself, so with both sending first each side sees
+only replies -- no rule, no administrator -- and the picture runs at 25-30
+frames a second (measured 2.5 MB/s). Where the networks do not route to each
+other (work), the pixels stay on Bluetooth and the mirror is slower but works.
+The window is captured with Windows.Graphics.Capture (the GPU hands over the
+window's own surface, ~15 ms for a 4K window, hidden or not); PrintWindow is
+the fallback.
+
+Before the machine sleeps Glissando lets go of Bluetooth (advertising, GATT
+server, link) and starts over after wake: a live LE server carried through
+suspend once left the Intel stack with a dead GATT server that only a restart
+of Windows cured. Should that happen anyway, the tray icon turns red and a
+balloon says what to do.
 ## Security
 
 Every frame is AES-256-GCM encrypted with a key derived from the passphrase
