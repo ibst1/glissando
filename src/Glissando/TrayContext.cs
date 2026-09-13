@@ -250,7 +250,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
 
     private void Apply(Settings working)
     {
-        bool restart = working.Passphrase != _settings.Passphrase || working.Ble != _settings.Ble;
+        bool restart = working.Passphrase != _settings.Passphrase || working.Ble != _settings.Ble || working.UdpMirror != _settings.UdpMirror;
         _settings.Passphrase = working.Passphrase;
         _settings.Ble = working.Ble;
         _settings.PeerX = working.PeerX;
@@ -259,12 +259,16 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _settings.CaptureEnabled = working.CaptureEnabled;
         _settings.SyncClipboard = working.SyncClipboard;
         _settings.HideCursorWhileControlling = working.HideCursorWhileControlling;
+        _settings.HideMirroredWindow = working.HideMirroredWindow;   // these two were never copied: the boxes looked dead
+        _settings.PowerSaveWhenIdle = working.PowerSaveWhenIdle;
+        _settings.UdpMirror = working.UdpMirror;
+        _settings.Placements = working.Placements;
         try { _settings.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
         Log.Info($"settings saved: ble={_settings.Ble} peer origin=({_settings.PeerX},{_settings.PeerY}) capture={_settings.CaptureEnabled}");
 
         if (restart)
         {
-            Log.Info("passphrase or Bluetooth role changed; restarting");
+            Log.Info("passphrase, Bluetooth role or network mirroring changed; restarting");
             _session.Dispose();
             _capture.Dispose();
             _tray.Visible = false;

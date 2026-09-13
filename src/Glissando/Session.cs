@@ -110,6 +110,31 @@ public sealed class Session : IDisposable
     private byte _clipId;
     private string? _lastClipboardSent;
     private readonly Dictionary<byte, (byte total, byte[]?[] chunks)> _clipIn = [];
+    private string _setupKey = "";
+
+    /// <summary>The screen setup changed (start, displays added or removed, the peer's monitors arrived): bring
+    /// in the placement remembered for it, or remember the current one for a setup seen for the first time.</summary>
+    private void ReconcilePlacement(string why)
+    {
+        var key = Layout.SetupKey(Layout.MyMonitors(), PeerName ?? "", _s.OtherMonitorList);
+        if (key == _setupKey) return;
+        _setupKey = key;
+        if (_s.RecallPlacement(key, out bool changed))
+        {
+            Log.Info($"screen setup ({why}): recalled placement, other PC at ({_s.PeerX},{_s.PeerY}){(changed ? "" : " (as now)")}");
+            if (!changed) return;
+            RebuildLayout();
+            try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
+            SettingsChanged?.Invoke();
+            if (Linked) SendHello();
+        }
+        else if (_s.PeerX != null)
+        {
+            _s.RememberPlacement(key);
+            try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
+            Log.Info($"screen setup ({why}): new; remembering the current placement for it");
+        }
+    }
 
     public Session(Settings s, IChannel channel, InputCapture capture, InputInjector injector, IClipboardAccess clipboard)
     {
@@ -273,6 +298,7 @@ public sealed class Session : IDisposable
 
     public void Start()
     {
+        ReconcilePlacement("start");
         _channel.Received += OnReceived;
         _channel.LinkChanged += OnLinkChanged;
         _channel.StatusChanged += st => { TransportStatus = st; StateChanged?.Invoke(); };
@@ -302,7 +328,17 @@ public sealed class Session : IDisposable
         };
         // Someone is at this PC: an invisible window in front of them would swallow their clicks, so show it.
         // The mirror goes on; only the hiding ends, until the next mirror is started.
-        _capture.LocalActivity += () => { if (_mirrorSender is { Hidden: true } m) { m.Reveal(); StateChanged?.Invoke(); } };
+        _capture.LocalActivity += at =>
+        {
+            // Show a hidden mirrored window again only when the person at this PC actually runs into it: a click
+            // where it invisibly is, or typing while it holds the focus. Any click or key at all was too eager -
+            // the user sat at this PC working in another window and the mirror never stayed hidden (2026-09-13).
+            if (_mirrorSender is not { Hidden: true } m) return;
+            bool hit = at is Point p ? Mirror.WindowCapture.VisibleBounds(m.Hwnd).Contains(p) : Mirror.WindowCapture.Foreground() == m.Hwnd;
+            if (!hit) return;
+            m.Reveal();
+            StateChanged?.Invoke();
+        };
         _injector.InputWhileInactive += () =>
         {
             // Give a late Enter 300 ms to show up before declaring the two sides out of step.
@@ -332,6 +368,8 @@ public sealed class Session : IDisposable
     public void ApplySettings()
     {
         RebuildLayout();
+        _s.RememberPlacement(_setupKey);
+        try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
         if (Linked) SendHello();
         StateChanged?.Invoke();
     }
@@ -340,6 +378,7 @@ public sealed class Session : IDisposable
     public void ScreenChanged()
     {
         RebuildLayout();
+        ReconcilePlacement("displays changed");
         _capture.ScreenChanged();
         _injector.ScreenChanged();
         if (Linked) SendHello();
@@ -572,6 +611,8 @@ public sealed class Session : IDisposable
             _s.OtherScreen = hello.Screen;
             changed = true;
         }
+        // The peer's monitors (or its name) may make this a setup we remember: recall before comparing notes.
+        ReconcilePlacement("hello");
         // The peer tells us where OUR origin sits in ITS pixels; ours is the mirror image.
         var theirView = new Point(-hello.PeerOrigin.X, -hello.PeerOrigin.Y);
         var myView = _capture.Layout.PeerOrigin;
@@ -587,6 +628,7 @@ public sealed class Session : IDisposable
             _s.PeerX = theirView.X;
             _s.PeerY = theirView.Y;
             _s.PlacementUpdated = hello.PlacementUpdated;
+            _s.RememberPlacement(_setupKey);
             changed = true;
         }
         if (!changed) return;

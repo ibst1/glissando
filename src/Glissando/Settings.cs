@@ -6,6 +6,14 @@ namespace Glissando;
 
 public enum BleMode { Auto, Advertise, Connect }
 
+public sealed class SavedPlacement
+{
+    public int PeerX { get; set; }
+    public int PeerY { get; set; }
+    /// <summary>Unix ms of the edit this placement came from (see Settings.PlacementUpdated).</summary>
+    public long Updated { get; set; }
+}
+
 public sealed class Settings
 {
     /// <summary>Shared secret; must be identical on both PCs. Frames are AES-GCM encrypted with a key derived from it.</summary>
@@ -45,6 +53,31 @@ public sealed class Settings
     /// each other that way (addresses exchanged over BLE; no configuration, no firewall rule). BLE remains the
     /// control path and carries the pixels itself when this is off or the network does not connect.</summary>
     public bool UdpMirror { get; set; } = true;
+
+    /// <summary>Placements remembered per screen setup - this PC's monitors, the other PC's name and its monitors -
+    /// so every desk (home, each office desk, the laptop on its own) comes back as it was left. Keyed by
+    /// Layout.SetupKey; PeerX/PeerY hold the placement in use, which is the entry for the current key.</summary>
+    public Dictionary<string, SavedPlacement> Placements { get; set; } = new();
+
+    /// <summary>Load the placement remembered for this setup into PeerX/PeerY. False if none is remembered.
+    /// <paramref name="changed"/> says whether the placement in use actually moved.</summary>
+    public bool RecallPlacement(string key, out bool changed)
+    {
+        changed = false;
+        if (!Layout.IsCompleteSetupKey(key) || !Placements.TryGetValue(key, out var p)) return false;
+        changed = PeerX != p.PeerX || PeerY != p.PeerY;
+        PeerX = p.PeerX;
+        PeerY = p.PeerY;
+        PlacementUpdated = changed ? p.Updated : Math.Max(PlacementUpdated, p.Updated);
+        return true;
+    }
+
+    /// <summary>Store the placement in use under this setup's key.</summary>
+    public void RememberPlacement(string key)
+    {
+        if (PeerX is not int x || PeerY is not int y || !Layout.IsCompleteSetupKey(key)) return;
+        Placements[key] = new SavedPlacement { PeerX = x, PeerY = y, Updated = PlacementUpdated };
+    }
 
     /// <summary>After a few minutes without input, ping only every 10 s so the BLE link can idle (first move after that is slower).</summary>
     public bool PowerSaveWhenIdle { get; set; }
@@ -107,6 +140,7 @@ public sealed class Settings
             if (File.Exists(FilePath))
             {
                 var s = JsonSerializer.Deserialize<Settings>(File.ReadAllText(FilePath), JsonOptions) ?? new Settings();
+                foreach (var k in s.Placements.Keys.Where(k => !Layout.IsCompleteSetupKey(k)).ToArray()) s.Placements.Remove(k);
                 s.KeepaliveMs = Math.Clamp(s.KeepaliveMs, 200, 10_000);
                 s.PeerTimeoutMs = Math.Clamp(s.PeerTimeoutMs, 1000, 60_000);
                 return s;

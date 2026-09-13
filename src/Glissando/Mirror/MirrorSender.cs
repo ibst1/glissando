@@ -74,6 +74,8 @@ internal sealed class MirrorSender
     /// <summary>True while the source window is invisible on this PC (see WindowHider).</summary>
     public bool Hidden => WindowHider.IsHidden(_hwnd);
 
+    public IntPtr Hwnd => _hwnd;
+
     /// <summary>Someone clicked or typed on this PC: show the window here again, and keep mirroring it. An
     /// invisible foreground window would otherwise swallow their clicks.</summary>
     public void Reveal()

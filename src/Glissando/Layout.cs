@@ -283,6 +283,58 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
 
     private static long Sq(long v) => v * v;
 
+    // ---- screen setups --------------------------------------------------------------
+
+    /// <summary>A monitor set as text, order-independent: "x,y,w,h#n;...".</summary>
+    public static string MonitorSignature(IEnumerable<MonitorRect> monitors) =>
+        string.Join(";", monitors.OrderBy(m => m.Bounds.Y).ThenBy(m => m.Bounds.X)
+            .Select(m => $"{m.Bounds.X},{m.Bounds.Y},{m.Bounds.Width},{m.Bounds.Height}#{m.Number}"));
+
+    /// <summary>Identifies a desk: this PC's monitors, the other PC's name and its monitors. Placements are
+    /// remembered per key (Settings.Placements). Before the other PC has said hello its part is empty, which
+    /// is a key of its own; the real one takes over when the monitors arrive.</summary>
+    public static string SetupKey(MonitorRect[] mine, string peerName, MonitorRect[] peer) =>
+        $"{MonitorSignature(mine)}|{peerName}|{MonitorSignature(peer)}";
+
+    /// <summary>True when both sides are known: this PC's monitors, the other PC's name and its monitors. Only
+    /// complete setups are remembered; before hello the key is provisional.</summary>
+    public static bool IsCompleteSetupKey(string key)
+    {
+        var parts = key.Split('|');
+        return parts.Length == 3 && parts[0] != "" && parts[1] != "" && parts[2] != "";
+    }
+
+    /// <summary>The monitors of both sides back out of a key (the dialog draws remembered setups from it).</summary>
+    public static bool TryParseSetupKey(string key, out MonitorRect[] mine, out string peerName, out MonitorRect[] peer)
+    {
+        mine = []; peer = []; peerName = "";
+        var parts = key.Split('|');
+        if (parts.Length != 3) return false;
+        static MonitorRect[] Parse(string sig) => sig.Split(';', StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => { var np = p.Split('#'); var a = np[0].Split(','); return (a, n: np.Length > 1 && int.TryParse(np[1], out var n) ? n : 0); })
+            .Where(x => x.a.Length >= 4 && x.a.All(v => int.TryParse(v, out _)))
+            .Select(x => new MonitorRect(new Rectangle(int.Parse(x.a[0]), int.Parse(x.a[1]), int.Parse(x.a[2]), int.Parse(x.a[3])), x.n))
+            .ToArray();
+        mine = Parse(parts[0]); peerName = parts[1]; peer = Parse(parts[2]);
+        return mine.Length > 0;
+    }
+
+    /// <summary>A setup key in words, for the settings dialog.</summary>
+    public static string DescribeSetup(string key, string peerNameNow)
+    {
+        var parts = key.Split('|');
+        static string Side(string sig)
+        {
+            var sizes = sig.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                .Select(p => p.Split('#')[0].Split(','))
+                .Where(a => a.Length >= 4)
+                .Select(a => $"{a[2]}x{a[3]}").ToArray();
+            return sizes.Length == 0 ? "screens unknown" : sizes.Length == 1 ? sizes[0] : $"{sizes.Length} screens ({string.Join(", ", sizes)})";
+        }
+        string name = parts.Length > 1 && parts[1] != "" ? parts[1] : (string.IsNullOrEmpty(peerNameNow) ? "other PC" : peerNameNow);
+        return $"this PC {Side(parts[0])} - {name} {(parts.Length > 2 ? Side(parts[2]) : "screens unknown")}";
+    }
+
     // ---- this PC's monitors -------------------------------------------------------
 
     /// <summary>This PC's monitors relative to the virtual screen's top-left, numbered as in Display settings.</summary>

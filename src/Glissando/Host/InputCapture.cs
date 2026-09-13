@@ -28,7 +28,7 @@ public sealed class InputCapture : IDisposable
 
     /// <summary>A physical (not injected) click or key-down on this PC while it is not controlling the other one.
     /// Cheap to raise; used to show a hidden mirrored window again, since someone is evidently sitting here.</summary>
-    public event Action? LocalActivity;
+    public event Action<Point?>? LocalActivity;   // the click's screen point; null for a key
 
     /// <summary>True while the other PC is controlling this one (set by the session from the injector state).</summary>
     public volatile bool BeingControlled;
@@ -122,7 +122,7 @@ public sealed class InputCapture : IDisposable
             {
                 if (BeingControlled && TakeBackArmed) LocalInputWhileControlled?.Invoke();
                 if (msg is Native.WM_LBUTTONDOWN or Native.WM_RBUTTONDOWN or Native.WM_MBUTTONDOWN or Native.WM_XBUTTONDOWN)
-                    LocalActivity?.Invoke();
+                    LocalActivity?.Invoke(new Point(info.pt.X, info.pt.Y));
             }
             return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
         }
@@ -186,7 +186,7 @@ public sealed class InputCapture : IDisposable
             if (!up && (info.flags & Native.LLKHF_INJECTED) == 0)
             {
                 if (BeingControlled && TakeBackArmed) LocalInputWhileControlled?.Invoke();
-                LocalActivity?.Invoke();
+                LocalActivity?.Invoke(null);
             }
             return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
         }

@@ -17,6 +17,9 @@ internal sealed class PlacementCanvas : Control
     public MonitorRect[] Peer { get; set; } = [];
     public string OtherName { get; set; } = "Other PC";
 
+    /// <summary>Thumbnail mode: no legend, no hint, no dragging - just the two desktops and the crossings.</summary>
+    public bool Compact { get; set; }
+
     private Point _origin;
     public Point PeerOrigin
     {
@@ -46,8 +49,8 @@ internal sealed class PlacementCanvas : Control
         var layout = Current;
         var union = Rectangle.Union(layout.MyBounds, layout.PeerBounds);
         if (union.IsEmpty) union = new Rectangle(0, 0, 1920, 1080);
-        const float legend = 20, hint = 18;
-        float margin = 0.18f * Math.Max(union.Width, union.Height);
+        float legend = Compact ? 4 : 20, hint = Compact ? 4 : 18;
+        float margin = (Compact ? 0.08f : 0.18f) * Math.Max(union.Width, union.Height);
         float worldW = union.Width + 2 * margin, worldH = union.Height + 2 * margin;
         float scale = Math.Min((Width - 16) / worldW, (Height - legend - hint - 8) / worldH);
         var origin = new PointF(
@@ -103,6 +106,8 @@ internal sealed class PlacementCanvas : Control
             else g.DrawLine(reachable, a, f, b, f);
         }
 
+        if (Compact) return;
+
         // Legend in the top corners and the hint at the bottom.
         using var legendMine = new SolidBrush(Color.FromArgb(60, 62, 76));
         using var legendPeer = new SolidBrush(Color.FromArgb(40, 90, 190));
@@ -143,7 +148,7 @@ internal sealed class PlacementCanvas : Control
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        if (e.Button != MouseButtons.Left || Peer.Length == 0) return;
+        if (Compact || e.Button != MouseButtons.Left || Peer.Length == 0) return;
         var (scale, origin) = View();
         var w = ToWorld(e.Location, scale, origin);
         var peerBox = Current.PeerBounds;
@@ -189,57 +194,105 @@ internal sealed class PlacementCanvas : Control
 
 internal sealed class SettingsForm : Form
 {
-    /// <summary>Raised on OK with the edited settings (already validated).</summary>
     public event Action<Settings>? Saved;
 
     private readonly Settings _s;
+    private readonly bool _firstRun;
+    private readonly string _peerName;
     private readonly TextBox _pass = new() { Width = 300 };
     private readonly PlacementCanvas _canvas = new() { Dock = DockStyle.Fill };
     private readonly NumericUpDown _peerX = new() { Minimum = -30000, Maximum = 30000, Width = 80 };
     private readonly NumericUpDown _peerY = new() { Minimum = -30000, Maximum = 30000, Width = 80 };
-    private readonly CheckBox _capture = new() { Text = "This PC's mouse and keyboard may control the other PC", AutoSize = true };
-    private readonly CheckBox _clip = new() { Text = "Copy clipboard text across when the cursor crosses", AutoSize = true };
-    private readonly CheckBox _autostart = new() { Text = "Start Glissando with Windows", AutoSize = true };
-    private readonly CheckBox _hideCursor = new() { Text = "Hide this PC's cursor while controlling the other PC (swaps the system cursors; restored on return, and on next start if Glissando is ever killed while they are hidden)", AutoSize = true, MaximumSize = new Size(480, 0) };
-    private readonly CheckBox _hideMirror = new() { Text = "Hide a window on this PC while it is mirrored to the other PC (it becomes invisible here, as if it had moved over; it shows again when the mirror stops or when you click or type on this PC)", AutoSize = true, MaximumSize = new Size(480, 0) };
-    private readonly CheckBox _powerSave = new() { Text = "Save power after 5 minutes without input (the first move after a pause is then slower)", AutoSize = true, MaximumSize = new Size(480, 0) };
+    private readonly CheckBox _capture = new(), _clip = new(), _autostart = new(), _hideCursor = new(), _hideMirror = new(), _udpMirror = new(), _powerSave = new();
     private readonly ComboBox _ble = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
-    private readonly Label _btInfo = new() { AutoSize = true, MaximumSize = new Size(470, 0) };
+    private readonly Label _btInfo = new() { AutoSize = true, MaximumSize = new Size(460, 0) };
+    private readonly Label _setupNow = new() { AutoSize = true, MaximumSize = new Size(460, 0) };
+    private readonly FlowLayoutPanel _gallery = new() { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, MaximumSize = new Size(TextWidth + 40, 250), AutoScroll = true, Margin = new Padding(0, 2, 0, 0) };
+    private string? _selectedSetup;
     private readonly Point _originalOrigin;
     private bool _syncing;
+
+    // Text width for wrapped option labels and notes: the tab page minus padding, at 100 % scaling (the
+    // form's Dpi auto-scaling scales it along with everything else).
+    private const int TextWidth = 440;
 
     public SettingsForm(Settings working, bool firstRun, string peerName)
     {
         _s = working;
+        _firstRun = firstRun;
+        _peerName = peerName;
         var initial = Glissando.Layout.FromSettings(working);
         _originalOrigin = initial.PeerOrigin;
 
         Text = (firstRun ? "Glissando setup" : "Glissando settings") + $"  ({Program.VersionLong})";
-        // Resizable, and never taller than the screen: the content panel below scrolls for the rest. The old
-        // fixed 800 px height ran off a laptop screen and hid the buttons and the last options.
+        // Resizable, never taller than the screen; each tab scrolls on its own if it must. The fixed 800 px
+        // height of the first version ran off a laptop screen and hid the buttons.
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Dpi;
         int workingHeight = Screen.PrimaryScreen?.WorkingArea.Height ?? 800;
-        ClientSize = new Size(524, Math.Clamp(workingHeight - 80, 360, 800));
-        MinimumSize = new Size(440, 300);
+        ClientSize = new Size(540, Math.Clamp(workingHeight - 120, 420, 640));
+        MinimumSize = new Size(460, 360);
         Font = new Font("Segoe UI", 9f);
         Log.Info($"settings form opening: firstRun={firstRun} peerOrigin={initial.PeerOrigin} mine={initial.Mine.Length} peer={initial.Peer.Length}");
         Log.Info("crossings: " + string.Join(" | ", initial.CrossingSegments().Select(s => $"{s.Side}@{s.Fixed} {s.From}-{s.To}")));
 
-        // Fixed button bar at the bottom, scrolling content above it. Added last so it docks first.
+        // Fixed button bar at the bottom, tabs above it. Added last so it docks first.
         var buttonBar = new Panel { Dock = DockStyle.Bottom, Height = 46, Padding = new Padding(14, 8, 14, 6) };
-        var content = new Panel { Dock = DockStyle.Fill, AutoScroll = true };
-        Controls.Add(content);
+        var tabs = new TabControl { Dock = DockStyle.Fill, Padding = new Point(14, 6) };
+        Controls.Add(tabs);
         Controls.Add(buttonBar);
 
-        var layout = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 1, Padding = new Padding(14, 10, 14, 10) };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        content.Controls.Add(layout);
+        tabs.TabPages.Add(BuildSetupPage(working));
+        tabs.TabPages.Add(BuildScreensPage(working, initial));
+        tabs.TabPages.Add(BuildOptionsPage(working));
+        // First run: the pairing tab; afterwards the screens, which is what one comes back to adjust.
+        tabs.SelectedIndex = firstRun ? 0 : 1;
 
-        // 1. Pairing
+        // Save commits and closes; Close just closes. Both work whether the form is modal (first run, from
+        // Program) or modeless (from the tray) -- a button's DialogResult alone only closes a modal form,
+        // which is why the old Cancel button did nothing from the tray.
+        var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, WrapContents = false };
+        var save = new Button { Text = firstRun ? "Save and start" : "Save", AutoSize = true, Margin = new Padding(6, 0, 0, 0) };
+        var close = new Button { Text = firstRun ? "Cancel" : "Close", AutoSize = true };
+        save.Click += (_, _) => { if (!Commit()) return; if (Modal) DialogResult = DialogResult.OK; else Close(); };
+        close.Click += (_, _) => { if (Modal) DialogResult = DialogResult.Cancel; else Close(); };
+        buttons.Controls.Add(save);
+        buttons.Controls.Add(close);
+        buttonBar.Controls.Add(buttons);
+        AcceptButton = save;
+        CancelButton = close;
+
+        Shown += (_, _) => FitToScreen();
+        Shown += async (_, _) => await LoadBluetoothInfoAsync();
+    }
+
+    // ---- pages ---------------------------------------------------------------------
+
+    private static TabPage Page(string title, out TableLayoutPanel layout, bool fill = false)
+    {
+        var page = new TabPage(title) { UseVisualStyleBackColor = true, Padding = new Padding(0) };
+        var scroller = new Panel { Dock = DockStyle.Fill, AutoScroll = !fill };
+        layout = new TableLayoutPanel
+        {
+            Dock = fill ? DockStyle.Fill : DockStyle.Top,
+            AutoSize = !fill,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            Padding = new Padding(14, 10, 14, 10),
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        scroller.Controls.Add(layout);
+        page.Controls.Add(scroller);
+        return page;
+    }
+
+    private TabPage BuildSetupPage(Settings working)
+    {
+        var page = Page("Setup", out var layout);
+
         layout.Controls.Add(Header("1. Pair the PCs once"));
         _btInfo.Text = "Reading Bluetooth adapter...";
         layout.Controls.Add(_btInfo);
@@ -250,7 +303,6 @@ internal sealed class SettingsForm : Form
         btRow.Controls.Add(new Label { Text = "Keep the Bluetooth page open on both PCs while pairing.", AutoSize = true, Padding = new Padding(6, 6, 0, 0) });
         layout.Controls.Add(btRow);
 
-        // 2. Passphrase
         layout.Controls.Add(Header("2. Passphrase (type the same one on the other PC)"));
         var passRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 2, 0, 8) };
         _pass.Text = working.Passphrase;
@@ -260,18 +312,42 @@ internal sealed class SettingsForm : Form
         passRow.Controls.Add(gen);
         layout.Controls.Add(passRow);
 
-        // 3. Placement
-        layout.Controls.Add(Header("3. Where do the other PC's screens stand?"));
+        layout.Controls.Add(Header("3. Bluetooth role"));
+        var bleRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 2, 0, 8) };
+        _ble.Items.AddRange(["Automatic (recommended)", "This PC advertises", "This PC connects"]);
+        _ble.SelectedIndex = (int)working.Ble;
+        bleRow.Controls.Add(_ble);
+        layout.Controls.Add(bleRow);
+        layout.Controls.Add(Note("Automatic lets the adapters decide: whichever can advertise does, and the PC with the lower address connects. Changing the role or the passphrase restarts Glissando."));
+
+        layout.Controls.Add(Header("4. Start"));
+        _autostart.Checked = Settings.StartWithWindows;
+        layout.Controls.Add(Option(_autostart, "Start Glissando with Windows"));
+        return page;
+    }
+
+    private TabPage BuildScreensPage(Settings working, Glissando.Layout initial)
+    {
+        var page = Page("Screens", out var layout, fill: true);
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // header
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // canvas
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // fields
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // remembered header
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // remembered note
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // list
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // forget buttons
+
+        layout.Controls.Add(Header("Where do the other PC's screens stand?"));
         _canvas.Mine = initial.Mine;
         _canvas.Peer = initial.Peer;
-        _canvas.OtherName = string.IsNullOrEmpty(peerName) ? "Other PC" : peerName;
+        _canvas.OtherName = string.IsNullOrEmpty(_peerName) ? "Other PC" : _peerName;
         _canvas.PeerOrigin = initial.PeerOrigin;
         _canvas.PlacementChanged += () => SyncFromCanvas();
-        var canvasHost = new Panel { Height = 178, Dock = DockStyle.Top, Margin = new Padding(0, 2, 0, 4), BorderStyle = BorderStyle.FixedSingle };
+        var canvasHost = new Panel { Dock = DockStyle.Fill, MinimumSize = new Size(0, 150), Margin = new Padding(0, 2, 0, 4), BorderStyle = BorderStyle.FixedSingle };
         canvasHost.Controls.Add(_canvas);
         layout.Controls.Add(canvasHost);
 
-        var placeRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
+        var placeRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 0, 0, 6) };
         placeRow.Controls.Add(new Label { Text = "Other PC's top-left corner at X", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
         _peerX.Value = Math.Clamp(initial.PeerOrigin.X, (int)_peerX.Minimum, (int)_peerX.Maximum);
         _peerX.ValueChanged += (_, _) => SyncFromFields();
@@ -283,46 +359,120 @@ internal sealed class SettingsForm : Form
         placeRow.Controls.Add(new Label { Text = "px, in this PC's pixels", AutoSize = true, Padding = new Padding(4, 6, 0, 0) });
         layout.Controls.Add(placeRow);
 
-        // 4. Options
-        layout.Controls.Add(Header("4. Options"));
-        _capture.Checked = working.CaptureEnabled;
-        _clip.Checked = working.SyncClipboard;
-        _autostart.Checked = Settings.StartWithWindows;
-        _hideCursor.Checked = working.HideCursorWhileControlling;
-        _hideMirror.Checked = working.HideMirroredWindow;
-        _powerSave.Checked = working.PowerSaveWhenIdle;
-        layout.Controls.Add(_capture);
-        layout.Controls.Add(_clip);
-        layout.Controls.Add(_hideCursor);
-        layout.Controls.Add(_hideMirror);
-        layout.Controls.Add(_powerSave);
-        layout.Controls.Add(_autostart);
-
-        var bleRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 6, 0, 8) };
-        bleRow.Controls.Add(new Label { Text = "Bluetooth role", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
-        _ble.Items.AddRange(["Automatic (recommended)", "This PC advertises", "This PC connects"]);
-        _ble.SelectedIndex = (int)working.Ble;
-        bleRow.Controls.Add(_ble);
-        layout.Controls.Add(bleRow);
-
-        // Buttons live in the fixed bottom bar so they are always visible, even when the content scrolls.
-        var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, AutoSize = false, WrapContents = false };
-        var ok = new Button { Text = firstRun ? "Save and start" : "Save", AutoSize = true, DialogResult = DialogResult.OK, Margin = new Padding(6, 0, 0, 0) };
-        var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
-        ok.Click += (_, _) => { if (!Commit()) DialogResult = DialogResult.None; };
-        buttons.Controls.Add(ok);
-        buttons.Controls.Add(cancel);
-        buttonBar.Controls.Add(buttons);
-        AcceptButton = ok;
-        CancelButton = cancel;
-
-        Shown += (_, _) => FitToScreen();
-        Shown += async (_, _) => await LoadBluetoothInfoAsync();
+        // Placements are remembered per screen setup (this PC's monitors + the other PC's), so each desk
+        // comes back as it was left. The current setup is marked; a stale one can be forgotten.
+        layout.Controls.Add(Header("Remembered setups"));
+        layout.Controls.Add(_setupNow);
+        layout.Controls.Add(_gallery);
+        var forgetRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
+        var forget = new Button { Text = "Forget selected", AutoSize = true };
+        forget.Click += (_, _) =>
+        {
+            if (_selectedSetup != null) { _s.Placements.Remove(_selectedSetup); _selectedSetup = null; RefreshSetups(); }
+        };
+        forgetRow.Controls.Add(forget);
+        forgetRow.Controls.Add(new Label { Text = "Each desk is remembered by its screens; the placement you save here belongs to the one marked.", AutoSize = true, MaximumSize = new Size(TextWidth - 120, 0), Padding = new Padding(8, 4, 0, 0) });
+        layout.Controls.Add(forgetRow);
+        RefreshSetups();
+        return page;
     }
 
-    /// <summary>Shrink and nudge the window so it fits, fully visible, on whatever screen it actually opened on.
-    /// The initial size is clamped to the primary screen's height, but the dialog can open on a smaller one; the
-    /// content panel scrolls, so shrinking here keeps every control (and the bottom button bar) reachable.</summary>
+    private TabPage BuildOptionsPage(Settings working)
+    {
+        var page = Page("Options", out var layout);
+        layout.Controls.Add(Header("Control"));
+        _capture.Checked = working.CaptureEnabled;
+        _clip.Checked = working.SyncClipboard;
+        _hideCursor.Checked = working.HideCursorWhileControlling;
+        layout.Controls.Add(Option(_capture, "This PC's mouse and keyboard may control the other PC"));
+        layout.Controls.Add(Option(_clip, "Copy clipboard text across when the cursor crosses"));
+        layout.Controls.Add(Option(_hideCursor, "Hide this PC's cursor while controlling the other PC (swaps the system cursors; restored on return, and on next start if Glissando is ever killed while they are hidden)"));
+
+        layout.Controls.Add(Header("Window mirroring"));
+        _hideMirror.Checked = working.HideMirroredWindow;
+        _udpMirror.Checked = working.UdpMirror;
+        layout.Controls.Add(Option(_hideMirror, "Hide a window on this PC while it is mirrored to the other PC. It becomes invisible here, as if it had moved over, and shows again when the mirror stops, when you click where it was, or when you type into it."));
+        layout.Controls.Add(Option(_udpMirror, "Send the mirrored picture over the network when both PCs are on one (Wi-Fi/LAN): 25-30 frames a second instead of Bluetooth's few. Addresses are exchanged automatically; nothing to configure, no firewall rule. Falls back to Bluetooth by itself."));
+
+        layout.Controls.Add(Header("Power"));
+        _powerSave.Checked = working.PowerSaveWhenIdle;
+        layout.Controls.Add(Option(_powerSave, "Save power after 5 minutes without input (the first move after a pause is then slower)"));
+        return page;
+    }
+
+    // ---- pieces --------------------------------------------------------------------
+
+    private static Label Header(string text) => new()
+    {
+        Text = text,
+        AutoSize = true,
+        Font = new Font("Segoe UI Semibold", 9.5f),
+        Margin = new Padding(0, 8, 0, 2),
+    };
+
+    private static Label Note(string text) => new()
+    {
+        Text = text,
+        AutoSize = true,
+        MaximumSize = new Size(TextWidth, 0),
+        ForeColor = SystemColors.GrayText,
+        Margin = new Padding(0, 0, 0, 6),
+    };
+
+    /// <summary>A check box with a wrapping label beside it. A CheckBox's own text does not wrap reliably (the
+    /// long options were cut off mid-sentence), a Label does; clicking the label toggles the box.</summary>
+    private static Control Option(CheckBox box, string text)
+    {
+        var row = new TableLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, ColumnCount = 2, Margin = new Padding(0, 1, 0, 3) };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        box.AutoSize = true;
+        box.Text = "";
+        box.Margin = new Padding(0, 2, 4, 0);
+        var label = new Label { Text = text, AutoSize = true, MaximumSize = new Size(TextWidth - 24, 0), Margin = new Padding(0, 1, 0, 0), Cursor = Cursors.Hand };
+        label.Click += (_, _) => box.Checked = !box.Checked;
+        row.Controls.Add(box, 0, 0);
+        row.Controls.Add(label, 1, 0);
+        return row;
+    }
+
+    private string CurrentSetupKey() => Glissando.Layout.SetupKey(_canvas.Mine, _peerName, _s.OtherMonitorList);
+
+    /// <summary>One thumbnail per remembered setup: the two desktops drawn as on the canvas above, the current
+    /// one marked in green, the selected one in blue. Text alone made two desks with the same screen sizes
+    /// indistinguishable; the picture shows where the other PC stands.</summary>
+    private void RefreshSetups()
+    {
+        string current = CurrentSetupKey();
+        bool complete = Glissando.Layout.IsCompleteSetupKey(current);
+        _setupNow.Text = !complete
+            ? "This setup is not known yet - it is remembered once the other PC has said hello."
+            : _s.Placements.ContainsKey(current) ? "This setup is remembered (marked green). Save to update it."
+            : "This setup is new - Save to remember it.";
+        _gallery.SuspendLayout();
+        foreach (Control c in _gallery.Controls.Cast<Control>().ToArray()) { _gallery.Controls.Remove(c); c.Dispose(); }
+        foreach (var kv in _s.Placements.OrderByDescending(kv => kv.Value.Updated))
+        {
+            if (!Glissando.Layout.TryParseSetupKey(kv.Key, out var mine, out var name, out var peer)) continue;
+            string key = kv.Key;
+            bool isCurrent = key == current, isSelected = key == _selectedSetup;
+            var tile = new Panel { Width = 150, Height = 116, Margin = new Padding(0, 0, 8, 8), Padding = new Padding(2), Cursor = Cursors.Hand, Tag = key,
+                BackColor = isSelected ? Color.FromArgb(66, 133, 244) : isCurrent ? Color.FromArgb(76, 175, 80) : Color.FromArgb(200, 200, 205) };
+            var thumb = new PlacementCanvas { Compact = true, Mine = mine, Peer = peer, PeerOrigin = new Point(kv.Value.PeerX, kv.Value.PeerY), OtherName = name, Dock = DockStyle.Fill, Cursor = Cursors.Hand };
+            var when = DateTimeOffset.FromUnixTimeMilliseconds(kv.Value.Updated).ToLocalTime();
+            var caption = new Label { Dock = DockStyle.Bottom, Height = 30, BackColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Font = new Font(Font.FontFamily, 7.5f), Cursor = Cursors.Hand,
+                Text = $"{mine.Length} + {peer.Length} screens{(isCurrent ? " - this desk" : "")}\n{name}, {when:d MMM yyyy}" };
+            tile.Controls.Add(thumb);
+            tile.Controls.Add(caption);
+            EventHandler select = (_, _) => { _selectedSetup = key; RefreshSetups(); };
+            tile.Click += select; thumb.Click += select; caption.Click += select;
+            _gallery.Controls.Add(tile);
+        }
+        if (_gallery.Controls.Count == 0) _gallery.Controls.Add(new Label { Text = "(none yet)", AutoSize = true, ForeColor = SystemColors.GrayText, Padding = new Padding(2, 4, 0, 4) });
+        _gallery.ResumeLayout();
+    }
+
+    /// <summary>Shrink and nudge the window so it fits, fully visible, on whatever screen it actually opened on.</summary>
     private void FitToScreen()
     {
         var wa = Screen.FromControl(this).WorkingArea;
@@ -346,15 +496,9 @@ internal sealed class SettingsForm : Form
             SyncFromCanvas();
         }
         _canvas.Invalidate();
+        _s.OtherMonitorList = current.OtherMonitorList;
+        RefreshSetups();
     }
-
-    private static Label Header(string text) => new()
-    {
-        Text = text,
-        AutoSize = true,
-        Font = new Font("Segoe UI Semibold", 9.5f),
-        Margin = new Padding(0, 6, 0, 2),
-    };
 
     private void SyncFromCanvas()
     {
@@ -390,10 +534,12 @@ internal sealed class SettingsForm : Form
             _s.PeerY = _canvas.PeerOrigin.Y;
             if (_canvas.PeerOrigin != _originalOrigin) _s.PlacementUpdated = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
+        _s.RememberPlacement(CurrentSetupKey());
         _s.CaptureEnabled = _capture.Checked;
         _s.SyncClipboard = _clip.Checked;
         _s.HideCursorWhileControlling = _hideCursor.Checked;
         _s.HideMirroredWindow = _hideMirror.Checked;
+        _s.UdpMirror = _udpMirror.Checked;
         _s.PowerSaveWhenIdle = _powerSave.Checked;
         Settings.StartWithWindows = _autostart.Checked;
         Saved?.Invoke(_s);
