@@ -189,6 +189,15 @@ to `%USERPROFILE%\Program\Glissando` and `dist\`:
 .\build.ps1
 ```
 
+**Run the copy in `%USERPROFILE%\Program\Glissando`, never the one in `dist\`.**
+`dist\` exists to carry the exe to the other PC through OneDrive; copy it out
+of there into that PC's `Program\Glissando` and start it from there. A running
+exe locks its file, so a Glissando started from the synced `dist\` copy stops
+OneDrive from ever replacing it -- that PC silently stays on an old build while
+`dist\` on the building PC moves on (RS sat on 0.3.45 for a day that way). At
+every start Glissando re-points its own autostart entry to the exe actually
+running, so ticking "Start with Windows" once from the right copy is enough.
+Both PCs must run the same build; the handshake says so when they do not.
 Every build has its own id, `0.3.<commit count>+<hash>` with `.dirty`
 appended when the tree had uncommitted changes, plus the build time. It is
 shown in the tray menu, the dialog title, the exe's file properties, and,
