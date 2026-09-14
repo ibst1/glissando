@@ -13,7 +13,7 @@ namespace Glissando;
 /// handle and id are private to NotifyIcon; they are read by reflection, and if that ever breaks the caller
 /// falls back to a blind re-add.
 /// </summary>
-internal static class TrayIconProbe
+public static class TrayIconProbe
 {
     [StructLayout(LayoutKind.Sequential)]
     private struct NOTIFYICONIDENTIFIER
@@ -39,10 +39,14 @@ internal static class TrayIconProbe
     {
         try
         {
-            if (WindowField?.GetValue(icon) is not NativeWindow window) return null;
+            // Say what failed when giving up, so a WinForms change shows in the log instead of as silence.
+            if (WindowField == null) { Log.Warn("tray icon probe: field _window not found"); return null; }
+            if (IdField == null) { Log.Warn("tray icon probe: field _id not found"); return null; }
+            if (WindowField.GetValue(icon) is not NativeWindow window) { Log.Warn("tray icon probe: _window is not a NativeWindow"); return null; }
             // _id is a uint in .NET 8 (an int in older WinForms); take either.
-            uint id = IdField?.GetValue(icon) switch { uint u => u, int i => (uint)i, _ => uint.MaxValue };
-            if (id == uint.MaxValue) return null;
+            object? raw = IdField.GetValue(icon);
+            uint? maybeId = raw switch { uint u => u, int i => (uint)i, _ => null };
+            if (maybeId is not uint id) { Log.Warn($"tray icon probe: _id has unexpected type {raw?.GetType().Name ?? "null"}"); return null; }
             if (window.Handle == IntPtr.Zero) return false;
             var ident = new NOTIFYICONIDENTIFIER { cbSize = (uint)Marshal.SizeOf<NOTIFYICONIDENTIFIER>(), hWnd = window.Handle, uID = id, guidItem = Guid.Empty };
             int hr = Shell_NotifyIconGetRect(ref ident, out _);
