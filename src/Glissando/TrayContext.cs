@@ -48,6 +48,11 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private readonly ToolStripMenuItem _mirrorItem;
     private readonly Mirror.MirrorReceiver _mirrorRx = new();
     private readonly System.Windows.Forms.Timer _fgTimer = new() { Interval = 400 };
+    // The icon watchdog (see TrayIconProbe): checks at 2, 5, 10, 20, 40, 60 and 120 s after start.
+    private readonly System.Windows.Forms.Timer _trayCheck = new();
+    private static readonly int[] TrayCheckDelaysMs = [2000, 3000, 5000, 10000, 20000, 20000, 60000];
+    private int _trayCheckStep;
+    private bool? _trayVerified;
     private IntPtr _lastRealWindow;
     private SettingsForm? _openForm;
     private readonly Microsoft.Win32.PowerModeChangedEventHandler _powerHandler;
@@ -88,6 +93,12 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
 
         _tray = new NotifyIcon { Icon = _iconIdle, Visible = true, Text = "Glissando", ContextMenuStrip = menu };
         _tray.DoubleClick += (_, _) => OpenSettings();
+        // Explorer may have refused the icon (NIM_ADD times out on a busy shell at logon) and WinForms does not
+        // notice; verify and re-add until Explorer holds it. And listen for another Glissando process asking us
+        // to exit or to show the settings, which is how the instance is reached when the icon is missing.
+        _trayCheck.Tick += (_, _) => CheckTrayIcon();
+        StartTrayCheck();
+        InstanceSignals.Listen(onExit: () => _window.BeginInvoke(Exit), onSetup: () => _window.BeginInvoke(OpenSettings));
 
         var layout = Layout.FromSettings(settings);
         _capture = new InputCapture(layout, _window.Handle);
@@ -119,7 +130,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _powerHandler = (_, e) =>
         {
             if (e.Mode == Microsoft.Win32.PowerModes.Suspend) _session.Suspend();
-            else if (e.Mode == Microsoft.Win32.PowerModes.Resume) _window.BeginInvoke(() => _session.Resume());
+            else if (e.Mode == Microsoft.Win32.PowerModes.Resume) _window.BeginInvoke(() => { _session.Resume(); StartTrayCheck(); });
         };
         Microsoft.Win32.SystemEvents.PowerModeChanged += _powerHandler;
 
@@ -127,7 +138,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _sessionHandler = (_, e) =>
         {
             if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionLock) _window.BeginInvoke(() => _session.SetLocalLocked(true));
-            else if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock) _window.BeginInvoke(() => _session.SetLocalLocked(false));
+            else if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock) _window.BeginInvoke(() => { _session.SetLocalLocked(false); StartTrayCheck(); });
         };
         Microsoft.Win32.SystemEvents.SessionSwitch += _sessionHandler;
 
@@ -136,6 +147,56 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     }
 
     private bool _versionWarned, _stuckWarned;
+
+    // ---- tray icon watchdog ----
+
+    private void StartTrayCheck()
+    {
+        _trayCheck.Stop();
+        _trayCheckStep = 0;
+        _trayVerified = null;
+        _trayCheck.Interval = TrayCheckDelaysMs[0];
+        _trayCheck.Start();
+    }
+
+    private void CheckTrayIcon()
+    {
+        _trayCheck.Stop();
+        int n = _trayCheckStep + 1;
+        bool? ok = TrayIconProbe.IsRegistered(_tray);
+        if (ok == true)
+        {
+            _trayVerified = true;
+            Log.Info(n > 1 ? $"tray icon verified after re-adding it ({n - 1}x)" : "tray icon verified");
+            return;
+        }
+        if (ok == null)
+        {
+            // Explorer cannot be asked (NotifyIcon's internals changed): one blind re-add at the second check.
+            if (n == 2) { Log.Warn("tray icon: cannot verify it; re-adding once blindly"); ReAddTrayIcon(); return; }
+        }
+        else
+        {
+            Log.Warn($"tray icon missing, re-adding ({n})");
+            ReAddTrayIcon();
+        }
+        _trayCheckStep++;
+        if (_trayCheckStep >= TrayCheckDelaysMs.Length)
+        {
+            _trayVerified = false;
+            Log.Warn("tray icon: Explorer still does not hold it after two minutes of retries (Glissando.exe --exit still works)");
+            return;
+        }
+        _trayCheck.Interval = TrayCheckDelaysMs[_trayCheckStep];
+        _trayCheck.Start();
+    }
+
+    /// <summary>NIM_DELETE then NIM_ADD: WinForms resets its "added" flag in between, so the add is really retried.</summary>
+    private void ReAddTrayIcon()
+    {
+        try { _tray.Visible = false; _tray.Visible = true; }
+        catch (Exception ex) { Log.Warn("tray icon re-add: " + ex.Message); }
+    }
 
     /// <summary>Remember the front application window (not ours, visible, titled, of a real size), so mirroring
     /// can target the window the user was using rather than whatever tiny window has focus at menu time.</summary>
@@ -185,7 +246,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         catch (Exception ex) { adapter = "error: " + ex.Message; }
         try
         {
-            Clipboard.SetText(_session.Diagnostics(adapter));
+            string tray = _trayVerified switch { true => "yes", false => "no", null => "not yet" };
+            Clipboard.SetText(_session.Diagnostics(adapter) + Environment.NewLine
+                + $"Process: exe={Environment.ProcessPath}; startWithWindows={Startup.RegisteredValue() ?? "(off)"}; trayIconVerified={tray}");
             _tray.ShowBalloonTip(3000, "Glissando", "Diagnostics copied to the clipboard.", ToolTipIcon.Info);
         }
         catch (Exception ex) { Log.Warn("diagnostics: " + ex.Message); }
@@ -302,6 +365,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             Microsoft.Win32.SystemEvents.SessionSwitch -= _sessionHandler;
             _fgTimer.Stop();
             _fgTimer.Dispose();
+            _trayCheck.Stop();
+            _trayCheck.Dispose();
+            InstanceSignals.Dispose();
             _mirrorRx.Close();
             _session.Dispose();
             _capture.Dispose();

@@ -24,7 +24,7 @@ internal static class Program
     private static int Main(string[] args)
     {
         string? settingsPath = null;
-        bool console = false, setup = false, mirrorTest = false;
+        bool console = false, setup = false, mirrorTest = false, exitOther = false;
         string? mirrorTitle = null;
         var overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -34,6 +34,7 @@ internal static class Program
             {
                 case "--console": console = true; break;
                 case "--setup": setup = true; break;
+                case "--exit": exitOther = true; break;
                 case "--keylog": Host.InputCapture.KeyLog = true; break;
                 case "--cursor-test":
                     // Hidden: blank the system cursors for two seconds and restore them, to check the mechanism.
@@ -91,18 +92,34 @@ internal static class Program
         AppDomain.CurrentDomain.ProcessExit += (_, _) => { Host.CursorHider.Restore(); Mirror.WindowHider.Unhide(); };
         AppDomain.CurrentDomain.UnhandledException += (_, _) => { Host.CursorHider.Restore(); Mirror.WindowHider.Unhide(); };
 
+        // "Glissando.exe --exit": stop the instance that runs, for when its tray icon is not there to click.
+        if (exitOther)
+        {
+            bool gone = InstanceSignals.RequestExit();
+            Native.AllocConsole();
+            Console.WriteLine(gone ? "Glissando has exited." : "Glissando is not running.");
+            return gone ? 0 : 1;
+        }
+
         // One instance per user. Wait a little so "restart" from the settings dialog works.
-        using var single = new Mutex(false, "Glissando-" + Environment.UserName);
+        using var single = new Mutex(false, InstanceSignals.MutexName);
         bool owned;
         try { owned = single.WaitOne(5000); }
         catch (AbandonedMutexException) { owned = true; }
         if (!owned)
         {
-            MessageBox.Show("Glissando is already running (see the tray icon).", "Glissando", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            // Another instance runs. Hand it the request instead of a box: a second start (or --setup) means
+            // "show me the settings" - its tray icon may well be missing (see TrayIconProbe), and the old box
+            // only said to look for it. The box remains for an instance too old to listen.
+            if (InstanceSignals.RequestSetup()) return 0;
+            MessageBox.Show("Glissando is already running. Its icon may be hidden in the taskbar's ^ overflow.\n\nTo stop it, run:  Glissando.exe --exit", "Glissando", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return 1;
         }
 
         var settings = Settings.Load(settingsPath);
+        // Autostart must launch THIS exe, whichever exe ticked the box (see Startup): a newer build under another
+        // path otherwise loses to the old one at every logon.
+        if (Startup.RepointIfStale() is string repointed) Log.Info(repointed);
         // Always reload the cursor scheme at startup. If any previous instance was killed while the cursor
         // was hidden, the whole system is left with blank cursors; this heals it whatever the setting says,
         // so the user can never be stuck unable to click. It just reloads the user's own cursors otherwise.
@@ -148,9 +165,10 @@ internal static class Program
     private const string Usage = """
         Glissando - share one keyboard and mouse between two PCs over Bluetooth LE.
 
-        Glissando.exe [--setup] [--ble auto|advertise|connect] [--settings <path>] [--console]
+        Glissando.exe [--setup] [--exit] [--ble auto|advertise|connect] [--settings <path>] [--console]
 
-          --setup     open the settings dialog before starting
+          --setup     open the settings dialog before starting (if Glissando already runs, opens its settings)
+          --exit      stop the running Glissando (for when its tray icon is not there to click)
           --ble       which PC is the BLE peripheral (auto decides by itself)
           --settings  settings file (default %APPDATA%\Glissando\settings.json)
           --console   show a console window with the log
