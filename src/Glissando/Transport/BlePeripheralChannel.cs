@@ -17,6 +17,8 @@ public sealed class BlePeripheralChannel : IChannel
     /// <summary>True while Windows reports the advertisement as running.</summary>
     public bool IsAdvertising => _provider?.AdvertisementStatus == GattServiceProviderAdvertisementStatus.Started;
 
+    private const int MaxAdvRestarts = 8;
+    private int _advFails;
     private GattServiceProvider? _provider;
     private GattLocalCharacteristic? _rx, _tx;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
@@ -67,25 +69,24 @@ public sealed class BlePeripheralChannel : IChannel
         // every 2 s forever churns the radio during the very window the central half is trying to scan and
         // connect. So give up after a few tries and go quiet: BleAutoChannel already treats "not advertising"
         // as "this PC connects", and scanning continues regardless. A run that does start resets the budget.
-        const int maxRestarts = 8;
-        int fails = 0;
+        _advFails = 0;
         while (!ct.IsCancellationRequested)
         {
             try { await Task.Delay(2000, ct); } catch (OperationCanceledException) { break; }
             var st = _provider.AdvertisementStatus;
             if (st is GattServiceProviderAdvertisementStatus.Aborted or GattServiceProviderAdvertisementStatus.Stopped)
             {
-                if (fails >= maxRestarts)
+                if (_advFails >= MaxAdvRestarts)
                 {
-                    if (fails == maxRestarts) { fails++; Log.Warn($"BLE advertising will not start after {maxRestarts} tries; giving up (this PC acts as central only)"); }
+                    if (_advFails == MaxAdvRestarts) { _advFails++; Log.Warn($"BLE advertising will not start after {MaxAdvRestarts} tries; giving up (this PC acts as central only)"); }
                     continue;
                 }
-                fails++;
-                Log.Warn($"BLE advertising is {st}; restarting ({fails}/{maxRestarts})");
+                _advFails++;
+                Log.Warn($"BLE advertising is {st}; restarting ({_advFails}/{MaxAdvRestarts})");
                 try { _provider.StartAdvertising(_advParams); }
                 catch (Exception ex) { Log.Error("StartAdvertising: " + ex.Message); }
             }
-            else if (st == GattServiceProviderAdvertisementStatus.Started) fails = 0;
+            else if (st == GattServiceProviderAdvertisementStatus.Started) _advFails = 0;
         }
         try { _provider.StopAdvertising(); } catch { }
     }
@@ -153,6 +154,7 @@ public sealed class BlePeripheralChannel : IChannel
         // After sleep Windows may still report Started while nothing is on the air, so restart it.
         var p = _provider;
         if (p == null) return;
+        _advFails = 0; // a manual reconnect or a wake gets a fresh set of restart attempts
         try { p.StopAdvertising(); } catch { }
         try { p.StartAdvertising(_advParams); Log.Info("BLE advertising restarted"); }
         catch (Exception ex) { Log.Error("StartAdvertising: " + ex.Message); }
