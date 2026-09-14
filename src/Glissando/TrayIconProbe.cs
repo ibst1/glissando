@@ -39,9 +39,12 @@ internal static class TrayIconProbe
     {
         try
         {
-            if (WindowField?.GetValue(icon) is not NativeWindow window || IdField?.GetValue(icon) is not int id) return null;
+            if (WindowField?.GetValue(icon) is not NativeWindow window) return null;
+            // _id is a uint in .NET 8 (an int in older WinForms); take either.
+            uint id = IdField?.GetValue(icon) switch { uint u => u, int i => (uint)i, _ => uint.MaxValue };
+            if (id == uint.MaxValue) return null;
             if (window.Handle == IntPtr.Zero) return false;
-            var ident = new NOTIFYICONIDENTIFIER { cbSize = (uint)Marshal.SizeOf<NOTIFYICONIDENTIFIER>(), hWnd = window.Handle, uID = (uint)id, guidItem = Guid.Empty };
+            var ident = new NOTIFYICONIDENTIFIER { cbSize = (uint)Marshal.SizeOf<NOTIFYICONIDENTIFIER>(), hWnd = window.Handle, uID = id, guidItem = Guid.Empty };
             int hr = Shell_NotifyIconGetRect(ref ident, out _);
             return hr == 0;
         }
