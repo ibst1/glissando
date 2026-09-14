@@ -150,5 +150,10 @@ public class ProtocolTests
         Assert.Equal(monitors, s.OtherMonitorList);
         s.OtherMonitors = "garbage";
         Assert.Empty(s.OtherMonitorList);
+        // A monitor identity (EDID model + serial) rides as a sixth field; absent when unknown, as above.
+        MonitorRect[] withIds = [new(new Rectangle(0, 0, 1920, 1200), 1, "DEL4362-H986684"), new(new Rectangle(1920, 0, 1920, 1200), 2)];
+        s.OtherMonitorList = withIds;
+        Assert.Equal("0,0,1920,1200,1,DEL4362-H986684;1920,0,1920,1200,2", s.OtherMonitors);
+        Assert.Equal(withIds, s.OtherMonitorList);
     }
 }

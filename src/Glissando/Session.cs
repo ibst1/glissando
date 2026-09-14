@@ -128,11 +128,30 @@ public sealed class Session : IDisposable
             SettingsChanged?.Invoke();
             if (Linked) SendHello();
         }
-        else if (_s.PeerX != null)
+        else if (Layout.IsCompleteSetupKey(key))
         {
-            _s.RememberPlacement(key);
-            try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
-            Log.Info($"screen setup ({why}): new; remembering the current placement for it");
+            // Not seen in this exact arrangement. If exactly one remembered desk has the same physical screens
+            // on both PCs, it is almost certainly this desk (a monitor renumbered or nudged): take its placement.
+            // With several candidates, do not guess - keep the current placement and let the Desks tab offer them.
+            var matches = _s.Placements.Keys.Where(k => k != key && Layout.SameScreens(k, key)).ToArray();
+            if (matches.Length == 1)
+            {
+                var only = _s.Placements[matches[0]];
+                _s.PeerX = only.PeerX; _s.PeerY = only.PeerY; _s.PlacementUpdated = only.Updated;
+                _s.RememberPlacement(key);
+                if (_s.Placements.TryGetValue(key, out var np)) np.Name = only.Name;
+                try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
+                Log.Info($"screen setup ({why}): new arrangement, but one remembered desk has the same screens on both PCs{(only.Name != "" ? $" (\"{only.Name}\")" : "")}: using its placement, other PC at ({only.PeerX},{only.PeerY})");
+                RebuildLayout();
+                SettingsChanged?.Invoke();
+                if (Linked) SendHello();
+            }
+            else if (_s.PeerX != null)
+            {
+                _s.RememberPlacement(key);
+                try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
+                Log.Info($"screen setup ({why}): new; remembering the current placement for it" + (matches.Length > 1 ? $" ({matches.Length} remembered desks have the same screens - pick one on the Desks tab)" : ""));
+            }
         }
     }
 

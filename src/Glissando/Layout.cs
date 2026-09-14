@@ -2,10 +2,11 @@ namespace Glissando;
 
 public enum Dir : byte { Left = 0, Right = 1, Up = 2, Down = 3 }
 
-/// <summary>A monitor: bounds relative to its PC's virtual-screen origin, and the number Windows shows for it.</summary>
-public readonly record struct MonitorRect(Rectangle Bounds, int Number)
+/// <summary>A monitor: bounds relative to its PC's virtual-screen origin, the number Windows shows for it, and
+/// the identity of the physical panel (EDID model + serial, see MonitorIdentity; empty when unknown).</summary>
+public readonly record struct MonitorRect(Rectangle Bounds, int Number, string Id = "")
 {
-    public MonitorRect Offset(Point by) => new(new Rectangle(Bounds.X + by.X, Bounds.Y + by.Y, Bounds.Width, Bounds.Height), Number);
+    public MonitorRect Offset(Point by) => new(new Rectangle(Bounds.X + by.X, Bounds.Y + by.Y, Bounds.Width, Bounds.Height), Number, Id);
 }
 
 /// <summary>
@@ -285,10 +286,10 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
 
     // ---- screen setups --------------------------------------------------------------
 
-    /// <summary>A monitor set as text, order-independent: "x,y,w,h#n;...".</summary>
+    /// <summary>A monitor set as text, order-independent: "x,y,w,h#n@id;...".</summary>
     public static string MonitorSignature(IEnumerable<MonitorRect> monitors) =>
         string.Join(";", monitors.OrderBy(m => m.Bounds.Y).ThenBy(m => m.Bounds.X)
-            .Select(m => $"{m.Bounds.X},{m.Bounds.Y},{m.Bounds.Width},{m.Bounds.Height}#{m.Number}"));
+            .Select(m => $"{m.Bounds.X},{m.Bounds.Y},{m.Bounds.Width},{m.Bounds.Height}#{m.Number}@{m.Id}"));
 
     /// <summary>Identifies a desk: this PC's monitors, the other PC's name and its monitors. Placements are
     /// remembered per key (Settings.Placements). Before the other PC has said hello its part is empty, which
@@ -311,12 +312,36 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         var parts = key.Split('|');
         if (parts.Length != 3) return false;
         static MonitorRect[] Parse(string sig) => sig.Split(';', StringSplitOptions.RemoveEmptyEntries)
-            .Select(p => { var np = p.Split('#'); var a = np[0].Split(','); return (a, n: np.Length > 1 && int.TryParse(np[1], out var n) ? n : 0); })
+            .Select(p =>
+            {
+                var at = p.Split('@', 2);
+                var np = at[0].Split('#');
+                var a = np[0].Split(',');
+                return (a, n: np.Length > 1 && int.TryParse(np[1], out var n) ? n : 0, id: at.Length > 1 ? at[1] : "");
+            })
             .Where(x => x.a.Length >= 4 && x.a.All(v => int.TryParse(v, out _)))
-            .Select(x => new MonitorRect(new Rectangle(int.Parse(x.a[0]), int.Parse(x.a[1]), int.Parse(x.a[2]), int.Parse(x.a[3])), x.n))
+            .Select(x => new MonitorRect(new Rectangle(int.Parse(x.a[0]), int.Parse(x.a[1]), int.Parse(x.a[2]), int.Parse(x.a[3])), x.n, x.id))
             .ToArray();
         mine = Parse(parts[0]); peerName = parts[1]; peer = Parse(parts[2]);
         return mine.Length > 0;
+    }
+
+    /// <summary>Two desks with the same physical screens on this PC and on the same other PC - the same panels
+    /// by EDID identity, whatever their positions or numbers - which is what makes them candidates when the exact
+    /// arrangement is not remembered. Where identities are missing (fake monitors, an EDID that could not be
+    /// read) that side compares by size instead, so nothing is worse than before.</summary>
+    public static bool SameScreens(string a, string b)
+    {
+        if (!TryParseSetupKey(a, out var am, out var an, out var ap) || !TryParseSetupKey(b, out var bm, out var bn, out var bp)) return false;
+        return an == bn && SameSet(am, bm) && SameSet(ap, bp);
+
+        static bool SameSet(MonitorRect[] x, MonitorRect[] y)
+        {
+            if (x.Length != y.Length) return false;
+            bool ids = x.All(m => m.Id != "") && y.All(m => m.Id != "");
+            IEnumerable<string> Keys(MonitorRect[] r) => r.Select(m => ids ? m.Id : $"{m.Bounds.Width}x{m.Bounds.Height}").OrderBy(k => k, StringComparer.Ordinal);
+            return Keys(x).SequenceEqual(Keys(y));
+        }
     }
 
     /// <summary>A setup key in words, for the settings dialog.</summary>
@@ -351,10 +376,12 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
             return rects.Select((r, i) => new MonitorRect(new Rectangle(r.X - minX, r.Y - minY, r.Width, r.Height), i + 1)).ToArray();
         }
         var v = Native.VirtualScreen();
+        var ids = MonitorIdentity.Query();
         var list = Screen.AllScreens
             .Select((s, i) => new MonitorRect(
                 new Rectangle(s.Bounds.X - v.X, s.Bounds.Y - v.Y, s.Bounds.Width, s.Bounds.Height),
-                DisplayNumber(s.DeviceName, i + 1)))
+                DisplayNumber(s.DeviceName, i + 1),
+                ids.TryGetValue(s.DeviceName, out var info) ? info.Id : ""))
             .ToArray();
         return list.Length > 0 ? list : [new MonitorRect(new Rectangle(0, 0, v.Width, v.Height), 1)];
     }

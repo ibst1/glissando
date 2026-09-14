@@ -12,6 +12,8 @@ public sealed class SavedPlacement
     public int PeerY { get; set; }
     /// <summary>Unix ms of the edit this placement came from (see Settings.PlacementUpdated).</summary>
     public long Updated { get; set; }
+    /// <summary>The user's own word for the desk ("Home", "Office A"); optional, local to this PC.</summary>
+    public string Name { get; set; } = "";
 }
 
 public sealed class Settings
@@ -76,7 +78,8 @@ public sealed class Settings
     public void RememberPlacement(string key)
     {
         if (PeerX is not int x || PeerY is not int y || !Layout.IsCompleteSetupKey(key)) return;
-        Placements[key] = new SavedPlacement { PeerX = x, PeerY = y, Updated = PlacementUpdated };
+        string name = Placements.TryGetValue(key, out var old) ? old.Name : "";
+        Placements[key] = new SavedPlacement { PeerX = x, PeerY = y, Updated = PlacementUpdated, Name = name };
     }
 
     /// <summary>After a few minutes without input, ping only every 10 s so the BLE link can idle (first move after that is slower).</summary>
@@ -109,14 +112,17 @@ public sealed class Settings
             try
             {
                 return OtherMonitors.Split(';', StringSplitOptions.RemoveEmptyEntries)
-                    .Select(m => m.Split(',').Select(int.Parse).ToArray())
-                    .Where(a => a.Length >= 4)
-                    .Select(a => new MonitorRect(new Rectangle(a[0], a[1], a[2], a[3]), a.Length > 4 ? a[4] : 0))
+                    .Select(m => m.Split(','))
+                    .Where(f => f.Length >= 4)
+                    .Select(f => new MonitorRect(
+                        new Rectangle(int.Parse(f[0]), int.Parse(f[1]), int.Parse(f[2]), int.Parse(f[3])),
+                        f.Length > 4 && int.TryParse(f[4], out var n) ? n : 0,
+                        f.Length > 5 ? f[5] : ""))
                     .ToArray();
             }
             catch (FormatException) { return []; }
         }
-        set => OtherMonitors = string.Join(";", value.Select(m => $"{m.Bounds.X},{m.Bounds.Y},{m.Bounds.Width},{m.Bounds.Height},{m.Number}"));
+        set => OtherMonitors = string.Join(";", value.Select(m => $"{m.Bounds.X},{m.Bounds.Y},{m.Bounds.Width},{m.Bounds.Height},{m.Number}" + (m.Id != "" ? "," + m.Id : "")));
     }
 
     [JsonIgnore]

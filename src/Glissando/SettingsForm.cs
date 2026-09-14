@@ -127,7 +127,7 @@ internal sealed class PlacementCanvas : Control
     private static void DrawTiles(Graphics g, MonitorRect[] tiles, Point offset, Brush fill, Pen border, Brush text,
         Font numberFont, Font font, float scale, PointF origin, StringFormat fmt, string single)
     {
-        foreach (var (bounds, number) in tiles)
+        foreach (var (bounds, number, _) in tiles)
         {
             var world = bounds;
             world.Offset(offset);
@@ -209,6 +209,12 @@ internal sealed class SettingsForm : Form
     private readonly Label _setupNow = new() { AutoSize = true, MaximumSize = new Size(460, 0) };
     private readonly FlowLayoutPanel _gallery = new() { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, MaximumSize = new Size(TextWidth + 40, 250), AutoScroll = true, Margin = new Padding(0, 2, 0, 0) };
     private string? _selectedSetup;
+    private readonly FlowLayoutPanel _galleryOther = new() { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, MaximumSize = new Size(TextWidth + 40, 0), Margin = new Padding(0, 2, 0, 0) };
+    private readonly Label _matchHeader = Header("Matching desks - the same screens on both PCs");
+    private readonly Label _otherHeader = Header("Other desks");
+    private readonly Button _useDesk = new() { Text = "Use its placement", AutoSize = true, Margin = new Padding(18, 0, 0, 0) };
+    private readonly TextBox _deskName = new() { Width = 150 };
+    private readonly Label _deskStatus = new() { AutoSize = true, MaximumSize = new Size(460, 0), Margin = new Padding(0, 4, 0, 0) };
     private readonly Point _originalOrigin;
     private bool _syncing;
 
@@ -247,6 +253,7 @@ internal sealed class SettingsForm : Form
 
         tabs.TabPages.Add(BuildSetupPage(working));
         tabs.TabPages.Add(BuildScreensPage(working, initial));
+        tabs.TabPages.Add(BuildDesksPage());
         tabs.TabPages.Add(BuildOptionsPage(working));
         // First run: the pairing tab; afterwards the screens, which is what one comes back to adjust.
         tabs.SelectedIndex = firstRun ? 0 : 1;
@@ -332,10 +339,7 @@ internal sealed class SettingsForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // header
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // canvas
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // fields
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // remembered header
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // remembered note
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // list
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // forget buttons
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // which desk this is
 
         layout.Controls.Add(Header("Where do the other PC's screens stand?"));
         _canvas.Mine = initial.Mine;
@@ -348,7 +352,7 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(canvasHost);
 
         var placeRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 0, 0, 6) };
-        placeRow.Controls.Add(new Label { Text = "Other PC's top-left corner at X", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
+        placeRow.Controls.Add(new Label { Text = "Other PC's top-left corner, in this PC's pixels:  X", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
         _peerX.Value = Math.Clamp(initial.PeerOrigin.X, (int)_peerX.Minimum, (int)_peerX.Maximum);
         _peerX.ValueChanged += (_, _) => SyncFromFields();
         placeRow.Controls.Add(_peerX);
@@ -356,24 +360,59 @@ internal sealed class SettingsForm : Form
         _peerY.Value = Math.Clamp(initial.PeerOrigin.Y, (int)_peerY.Minimum, (int)_peerY.Maximum);
         _peerY.ValueChanged += (_, _) => SyncFromFields();
         placeRow.Controls.Add(_peerY);
-        placeRow.Controls.Add(new Label { Text = "px, in this PC's pixels", AutoSize = true, Padding = new Padding(4, 6, 0, 0) });
+        placeRow.Controls.Add(new Label { Text = "px", AutoSize = true, Padding = new Padding(4, 6, 0, 0) });
         layout.Controls.Add(placeRow);
 
-        // Placements are remembered per screen setup (this PC's monitors + the other PC's), so each desk
-        // comes back as it was left. The current setup is marked; a stale one can be forgotten.
-        layout.Controls.Add(Header("Remembered setups"));
+        layout.Controls.Add(_deskStatus);
+        RefreshSetups();
+        return page;
+    }
+
+    /// <summary>Every desk the placement has been saved for, as a thumbnail of its layout; the one you sit at
+    /// is marked. A desk is told apart by its screens (this PC's and the other PC's); the name is yours.</summary>
+    private TabPage BuildDesksPage()
+    {
+        var page = Page("Desks", out var layout);
+        layout.Controls.Add(Header("Remembered desks"));
+        layout.Controls.Add(Note("Each desk is remembered by its screens - which panels are connected to this PC and to the other one, told apart by their serial numbers - and the placement saved on the Screens tab belongs to the desk you are at. Green: this desk. Click one to select it."));
         layout.Controls.Add(_setupNow);
+        _gallery.MaximumSize = new Size(TextWidth + 40, 0);
+        _gallery.AutoScroll = false;
+        layout.Controls.Add(_matchHeader);
         layout.Controls.Add(_gallery);
-        var forgetRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
-        var forget = new Button { Text = "Forget selected", AutoSize = true };
+        layout.Controls.Add(_otherHeader);
+        layout.Controls.Add(_galleryOther);
+
+        var nameRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 6, 0, 0) };
+        nameRow.Controls.Add(new Label { Text = "Name", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
+        var setName = new Button { Text = "Set", AutoSize = true };
+        void ApplyName()
+        {
+            if (_selectedSetup == null || !_s.Placements.TryGetValue(_selectedSetup, out var p)) return;
+            p.Name = _deskName.Text.Trim();
+            RefreshSetups();
+        }
+        setName.Click += (_, _) => ApplyName();
+        _deskName.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) { ApplyName(); e.SuppressKeyPress = true; } };
+        nameRow.Controls.Add(_deskName);
+        nameRow.Controls.Add(setName);
+        // A matching desk's placement can be taken over: it lands on the Screens canvas, Save keeps it for this desk.
+        _useDesk.Click += (_, _) =>
+        {
+            if (_selectedSetup == null || !_s.Placements.TryGetValue(_selectedSetup, out var p)) return;
+            _canvas.PeerOrigin = new Point(p.PeerX, p.PeerY);
+            SyncFromCanvas();
+            _setupNow.Text = $"Placement of {(p.Name != "" ? $"\"{p.Name}\"" : "the selected desk")} applied on the Screens tab - Save to keep it for this desk.";
+        };
+        nameRow.Controls.Add(_useDesk);
+        var forget = new Button { Text = "Forget selected", AutoSize = true, Margin = new Padding(18, 0, 0, 0) };
         forget.Click += (_, _) =>
         {
             if (_selectedSetup != null) { _s.Placements.Remove(_selectedSetup); _selectedSetup = null; RefreshSetups(); }
         };
-        forgetRow.Controls.Add(forget);
-        forgetRow.Controls.Add(new Label { Text = "Each desk is remembered by its screens; the placement you save here belongs to the one marked.", AutoSize = true, MaximumSize = new Size(TextWidth - 120, 0), Padding = new Padding(8, 4, 0, 0) });
-        layout.Controls.Add(forgetRow);
-        RefreshSetups();
+        nameRow.Controls.Add(forget);
+        layout.Controls.Add(nameRow);
+        layout.Controls.Add(Note("Names are this PC's own words for its desks; the placement itself is what the two PCs share."));
         return page;
     }
 
@@ -445,31 +484,46 @@ internal sealed class SettingsForm : Form
     {
         string current = CurrentSetupKey();
         bool complete = Glissando.Layout.IsCompleteSetupKey(current);
+        string currentName = _s.Placements.TryGetValue(current, out var cp) && cp.Name != "" ? $"\"{cp.Name}\"" : "";
         _setupNow.Text = !complete
-            ? "This setup is not known yet - it is remembered once the other PC has said hello."
-            : _s.Placements.ContainsKey(current) ? "This setup is remembered (marked green). Save to update it."
-            : "This setup is new - Save to remember it.";
-        _gallery.SuspendLayout();
-        foreach (Control c in _gallery.Controls.Cast<Control>().ToArray()) { _gallery.Controls.Remove(c); c.Dispose(); }
-        foreach (var kv in _s.Placements.OrderByDescending(kv => kv.Value.Updated))
+            ? "This desk is not known yet - it is remembered once the other PC has said hello."
+            : _s.Placements.ContainsKey(current) ? $"You are at {(currentName != "" ? currentName : "a remembered desk")} (green)."
+            : "This desk is new - Save on the Screens tab to remember it.";
+        _deskStatus.Text = !complete ? "This desk is remembered once the other PC has said hello."
+            : _s.Placements.ContainsKey(current) ? $"This desk: {(currentName != "" ? currentName : "unnamed")} - remembered; Save updates it. Name it on the Desks tab."
+            : "This desk is new - Save remembers it. Name it on the Desks tab.";
+        if (_selectedSetup != null && _s.Placements.TryGetValue(_selectedSetup, out var sp)) _deskName.Text = sp.Name; else _deskName.Text = "";
+        _deskName.Enabled = _selectedSetup != null;
+        _useDesk.Enabled = _selectedSetup != null && _selectedSetup != current && Glissando.Layout.SameScreens(_selectedSetup, current);
+        _gallery.SuspendLayout(); _galleryOther.SuspendLayout();
+        foreach (var g in new[] { _gallery, _galleryOther })
+            foreach (Control c in g.Controls.Cast<Control>().ToArray()) { g.Controls.Remove(c); c.Dispose(); }
+        // The exact desk first, then by recency; desks with the same screen counts on both PCs in the first
+        // group (they are the candidates when the arrangement is new), everything else below.
+        foreach (var kv in _s.Placements.OrderByDescending(kv => kv.Key == current).ThenByDescending(kv => kv.Value.Updated))
         {
             if (!Glissando.Layout.TryParseSetupKey(kv.Key, out var mine, out var name, out var peer)) continue;
             string key = kv.Key;
             bool isCurrent = key == current, isSelected = key == _selectedSetup;
-            var tile = new Panel { Width = 150, Height = 116, Margin = new Padding(0, 0, 8, 8), Padding = new Padding(2), Cursor = Cursors.Hand, Tag = key,
+            var tile = new Panel { Width = 150, Height = 120, Margin = new Padding(0, 0, 8, 8), Padding = new Padding(2), Cursor = Cursors.Hand, Tag = key,
                 BackColor = isSelected ? Color.FromArgb(66, 133, 244) : isCurrent ? Color.FromArgb(76, 175, 80) : Color.FromArgb(200, 200, 205) };
             var thumb = new PlacementCanvas { Compact = true, Mine = mine, Peer = peer, PeerOrigin = new Point(kv.Value.PeerX, kv.Value.PeerY), OtherName = name, Dock = DockStyle.Fill, Cursor = Cursors.Hand };
             var when = DateTimeOffset.FromUnixTimeMilliseconds(kv.Value.Updated).ToLocalTime();
-            var caption = new Label { Dock = DockStyle.Bottom, Height = 30, BackColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Font = new Font(Font.FontFamily, 7.5f), Cursor = Cursors.Hand,
-                Text = $"{mine.Length} + {peer.Length} screens{(isCurrent ? " - this desk" : "")}\n{name}, {when:d MMM yyyy}" };
+            string title = kv.Value.Name != "" ? kv.Value.Name : $"{mine.Length} + {peer.Length} screens";
+            var caption = new Label { Dock = DockStyle.Bottom, Height = 34, BackColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Font = new Font(Font.FontFamily, 7.5f), Cursor = Cursors.Hand,
+                Text = $"{title}{(isCurrent ? " - you are here" : "")}\n{name}, {when:d MMM}" };
             tile.Controls.Add(thumb);
             tile.Controls.Add(caption);
             EventHandler select = (_, _) => { _selectedSetup = key; RefreshSetups(); };
             tile.Click += select; thumb.Click += select; caption.Click += select;
-            _gallery.Controls.Add(tile);
+            (complete && Glissando.Layout.SameScreens(key, current) ? _gallery : _galleryOther).Controls.Add(tile);
         }
-        if (_gallery.Controls.Count == 0) _gallery.Controls.Add(new Label { Text = "(none yet)", AutoSize = true, ForeColor = SystemColors.GrayText, Padding = new Padding(2, 4, 0, 4) });
-        _gallery.ResumeLayout();
+        bool anyMatch = _gallery.Controls.Count > 0, anyOther = _galleryOther.Controls.Count > 0;
+        _matchHeader.Visible = anyMatch; _gallery.Visible = anyMatch;
+        _otherHeader.Visible = anyOther; _galleryOther.Visible = anyOther;
+        if (!anyMatch && !anyOther) { _otherHeader.Visible = true; _otherHeader.Text = "Remembered desks"; _galleryOther.Visible = true; _galleryOther.Controls.Add(new Label { Text = "(none yet)", AutoSize = true, ForeColor = SystemColors.GrayText, Padding = new Padding(2, 4, 0, 4) }); }
+        else _otherHeader.Text = anyMatch ? "Other desks" : "Remembered desks";
+        _gallery.ResumeLayout(); _galleryOther.ResumeLayout();
     }
 
     /// <summary>Shrink and nudge the window so it fits, fully visible, on whatever screen it actually opened on.</summary>

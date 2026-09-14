@@ -138,8 +138,9 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         var versionBytes = Encoding.UTF8.GetBytes(h.AppVersion ?? "");
         if (versionBytes.Length > 40) versionBytes = versionBytes[..40];
         var monitors = h.Monitors.Take(HelloInfo.MaxMonitors).ToArray();
+        var ids = monitors.Select(m => { var b = Encoding.UTF8.GetBytes(m.Id ?? ""); return b.Length > 40 ? b[..40] : b; }).ToArray();
         int udpCount = Math.Min(8, h.UdpAddresses?.Length ?? 0);
-        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + 1 + versionBytes.Length + 3 + udpCount * 4 + nameBytes.Length];
+        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + ids.Sum(b => 1 + b.Length) + 1 + versionBytes.Length + 3 + udpCount * 4 + nameBytes.Length];
         p[0] = HelloInfo.Version;
         p[1] = (byte)(h.CaptureEnabled ? 1 : 0);
         BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(2), h.PeerOrigin.X);
@@ -150,14 +151,18 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         h.Nonce.AsSpan(0, 16).CopyTo(p.AsSpan(22));
         p[38] = (byte)monitors.Length;
         int o = HelloInfo.FixedSize;
-        foreach (var m in monitors)
+        for (int i = 0; i < monitors.Length; i++)
         {
+            var m = monitors[i];
             BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(o), m.Bounds.X);
             BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(o + 4), m.Bounds.Y);
             BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(o + 8), m.Bounds.Width);
             BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(o + 12), m.Bounds.Height);
             p[o + 16] = (byte)Math.Clamp(m.Number, 0, 255);
             o += HelloInfo.MonitorSize;
+            p[o++] = (byte)ids[i].Length;          // v6: the panel's identity follows each monitor
+            ids[i].CopyTo(p, o);
+            o += ids[i].Length;
         }
         p[o++] = (byte)versionBytes.Length;
         versionBytes.CopyTo(p, o);
@@ -260,7 +265,7 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
 public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Screen, long PlacementUpdated, byte[] Nonce, MonitorRect[] Monitors, string Name, string AppVersion = "",
     ushort UdpPort = 0, IPAddress[]? UdpAddresses = null)
 {
-    public const byte Version = 5;   // 5: UDP pixel-path port and addresses after the app version
+    public const byte Version = 6;   // 5: UDP pixel-path port and addresses after the app version; 6: a monitor id after each monitor
     public const int FixedSize = 1 + 1 + 4 + 4 + 2 + 2 + 8 + 16 + 1;
     public const int MonitorSize = 17;
     public const int MaxMonitors = 16;
@@ -271,14 +276,23 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
         if (f.Type != FrameType.Hello || p.Length < FixedSize || p[0] != Version) return null;
         int count = p[38];
         int o = FixedSize;
-        if (p.Length < o + count * MonitorSize + 1) return null;
         var monitors = new MonitorRect[count];
-        for (int i = 0; i < count; i++, o += MonitorSize)
-            monitors[i] = new MonitorRect(new Rectangle(
+        for (int i = 0; i < count; i++)
+        {
+            if (p.Length < o + MonitorSize + 1) return null;
+            var bounds = new Rectangle(
                 BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(o)),
                 BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(o + 4)),
                 BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(o + 8)),
-                BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(o + 12))), p[o + 16]);
+                BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(o + 12)));
+            int number = p[o + 16];
+            o += MonitorSize;
+            int idLen = p[o++];
+            if (p.Length < o + idLen) return null;
+            monitors[i] = new MonitorRect(bounds, number, Encoding.UTF8.GetString(p, o, idLen));
+            o += idLen;
+        }
+        if (p.Length < o + 1) return null;
         int versionLen = p[o++];
         if (p.Length < o + versionLen) return null;
         string appVersion = Encoding.UTF8.GetString(p, o, versionLen);
