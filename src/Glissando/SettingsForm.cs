@@ -214,6 +214,7 @@ internal sealed class SettingsForm : Form
     private readonly Label _otherHeader = Header("Other desks");
     private readonly Button _useDesk = new() { Text = "Use its placement", AutoSize = true, Margin = new Padding(18, 0, 0, 0) };
     private readonly TextBox _deskName = new() { Width = 150 };
+    private readonly ToolTip _tips = new();
     private readonly Label _deskStatus = new() { AutoSize = true, MaximumSize = new Size(460, 0), Margin = new Padding(0, 4, 0, 0) };
     private readonly Point _originalOrigin;
     private bool _syncing;
@@ -496,6 +497,14 @@ internal sealed class SettingsForm : Form
         if (_selectedSetup != null && _s.Placements.TryGetValue(_selectedSetup, out var sp)) _deskName.Text = sp.Name; else _deskName.Text = "";
         _deskName.Enabled = _selectedSetup != null;
         _useDesk.Enabled = _selectedSetup != null && _selectedSetup != current && Glissando.Layout.SameScreens(_selectedSetup, current);
+        // Controls made after the form was shown are not DPI-scaled by WinForms: scale them by hand, or at
+        // 150 % the tiles come out two thirds of their size and the captions lose their second line (RS).
+        float k = DeviceDpi / 96f;
+        int S(int logical) => (int)Math.Round(logical * k);
+        var tileFont = new Font(Font.FontFamily, 8f);
+        int captionH = TextRenderer.MeasureText("Xg", tileFont).Height * 2 + S(6);
+        _gallery.MaximumSize = new Size(S(TextWidth + 40), 0);
+        _galleryOther.MaximumSize = new Size(S(TextWidth + 40), 0);
         _gallery.SuspendLayout(); _galleryOther.SuspendLayout();
         foreach (var g in new[] { _gallery, _galleryOther })
             foreach (Control c in g.Controls.Cast<Control>().ToArray()) { g.Controls.Remove(c); c.Dispose(); }
@@ -506,13 +515,14 @@ internal sealed class SettingsForm : Form
             if (!Glissando.Layout.TryParseSetupKey(kv.Key, out var mine, out var name, out var peer)) continue;
             string key = kv.Key;
             bool isCurrent = key == current, isSelected = key == _selectedSetup;
-            var tile = new Panel { Width = 150, Height = 120, Margin = new Padding(0, 0, 8, 8), Padding = new Padding(2), Cursor = Cursors.Hand, Tag = key,
+            var tile = new Panel { Width = S(150), Height = S(90) + captionH, Margin = new Padding(0, 0, S(8), S(8)), Padding = new Padding(S(2)), Cursor = Cursors.Hand, Tag = key,
                 BackColor = isSelected ? Color.FromArgb(66, 133, 244) : isCurrent ? Color.FromArgb(76, 175, 80) : Color.FromArgb(200, 200, 205) };
             var thumb = new PlacementCanvas { Compact = true, Mine = mine, Peer = peer, PeerOrigin = new Point(kv.Value.PeerX, kv.Value.PeerY), OtherName = name, Dock = DockStyle.Fill, Cursor = Cursors.Hand };
             var when = DateTimeOffset.FromUnixTimeMilliseconds(kv.Value.Updated).ToLocalTime();
             string title = kv.Value.Name != "" ? kv.Value.Name : $"{mine.Length} + {peer.Length} screens";
-            var caption = new Label { Dock = DockStyle.Bottom, Height = 34, BackColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Font = new Font(Font.FontFamily, 7.5f), Cursor = Cursors.Hand,
-                Text = $"{title}{(isCurrent ? " - you are here" : "")}\n{name}, {when:d MMM}" };
+            var caption = new Label { Dock = DockStyle.Bottom, Height = captionH, BackColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Font = tileFont, Cursor = Cursors.Hand, AutoEllipsis = true,
+                Text = $"{title}\n{name}, {when:d MMM}" };
+            _tips.SetToolTip(caption, $"{title}{(isCurrent ? " - you are at this desk" : "")}\n{mine.Length} + {peer.Length} screens, other PC at ({kv.Value.PeerX}, {kv.Value.PeerY})\nsaved {when:g}");
             tile.Controls.Add(thumb);
             tile.Controls.Add(caption);
             EventHandler select = (_, _) => { _selectedSetup = key; RefreshSetups(); };
