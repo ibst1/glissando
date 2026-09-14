@@ -140,7 +140,9 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         var monitors = h.Monitors.Take(HelloInfo.MaxMonitors).ToArray();
         var ids = monitors.Select(m => { var b = Encoding.UTF8.GetBytes(m.Id ?? ""); return b.Length > 40 ? b[..40] : b; }).ToArray();
         int udpCount = Math.Min(8, h.UdpAddresses?.Length ?? 0);
-        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + ids.Sum(b => 1 + b.Length) + 1 + versionBytes.Length + 3 + udpCount * 4 + nameBytes.Length];
+        var deskBytes = Encoding.UTF8.GetBytes(h.DeskName ?? "");
+        if (deskBytes.Length > 40) deskBytes = deskBytes[..40];
+        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + ids.Sum(b => 1 + b.Length) + 1 + versionBytes.Length + 3 + udpCount * 4 + 9 + deskBytes.Length + nameBytes.Length];
         p[0] = HelloInfo.Version;
         p[1] = (byte)(h.CaptureEnabled ? 1 : 0);
         BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(2), h.PeerOrigin.X);
@@ -173,6 +175,12 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         p[o + 2] = (byte)addrs.Length;
         o += 3;
         foreach (var a in addrs) { a.GetAddressBytes().AsSpan(0, 4).CopyTo(p.AsSpan(o)); o += 4; }
+        // v7: the name of the desk this PC believes it is at, and when that name was set.
+        BinaryPrimitives.WriteInt64LittleEndian(p.AsSpan(o), h.DeskNameUpdated);
+        p[o + 8] = (byte)deskBytes.Length;
+        o += 9;
+        deskBytes.CopyTo(p, o);
+        o += deskBytes.Length;
         nameBytes.CopyTo(p, o);
         return new(FrameType.Hello, p);
     }
@@ -263,9 +271,9 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
 /// compared by timestamp so that whichever PC was configured last wins. Monitors are the sender's own.
 /// </summary>
 public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Screen, long PlacementUpdated, byte[] Nonce, MonitorRect[] Monitors, string Name, string AppVersion = "",
-    ushort UdpPort = 0, IPAddress[]? UdpAddresses = null)
+    ushort UdpPort = 0, IPAddress[]? UdpAddresses = null, string DeskName = "", long DeskNameUpdated = 0)
 {
-    public const byte Version = 6;   // 5: UDP pixel-path port and addresses after the app version; 6: a monitor id after each monitor
+    public const byte Version = 7;   // 5: UDP port+addresses; 6: a monitor id per monitor; 7: the current desk's name and when it was set
     public const int FixedSize = 1 + 1 + 4 + 4 + 2 + 2 + 8 + 16 + 1;
     public const int MonitorSize = 17;
     public const int MaxMonitors = 16;
@@ -304,6 +312,13 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
         if (p.Length < o + udpCount * 4) return null;
         var udpAddrs = new IPAddress[udpCount];
         for (int i = 0; i < udpCount; i++, o += 4) udpAddrs[i] = new IPAddress(p.AsSpan(o, 4));
+        if (p.Length < o + 9) return null;
+        long deskUpdated = BinaryPrimitives.ReadInt64LittleEndian(p.AsSpan(o));
+        int deskLen = p[o + 8];
+        o += 9;
+        if (p.Length < o + deskLen) return null;
+        string deskName = Encoding.UTF8.GetString(p, o, deskLen);
+        o += deskLen;
         return new HelloInfo(
             p[1] != 0,
             new Point(BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(2)), BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(6))),
@@ -314,7 +329,9 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
             Encoding.UTF8.GetString(p, o, p.Length - o),
             appVersion,
             udpPort,
-            udpAddrs);
+            udpAddrs,
+            deskName,
+            deskUpdated);
     }
 }
 

@@ -389,7 +389,8 @@ internal sealed class SettingsForm : Form
         void ApplyName()
         {
             if (_selectedSetup == null || !_s.Placements.TryGetValue(_selectedSetup, out var p)) return;
-            p.Name = _deskName.Text.Trim();
+            string name = _deskName.Text.Trim();
+            if (name != p.Name) { p.Name = name; p.NameUpdated = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); }
             RefreshSetups();
         }
         setName.Click += (_, _) => ApplyName();
@@ -412,7 +413,7 @@ internal sealed class SettingsForm : Form
         };
         nameRow.Controls.Add(forget);
         layout.Controls.Add(nameRow);
-        layout.Controls.Add(Note("Names are this PC's own words for its desks; the placement itself is what the two PCs share."));
+        layout.Controls.Add(Note("Names and placements are shared with the other PC when you save; whoever named a desk last wins."));
         return page;
     }
 

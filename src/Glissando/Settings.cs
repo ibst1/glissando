@@ -12,8 +12,11 @@ public sealed class SavedPlacement
     public int PeerY { get; set; }
     /// <summary>Unix ms of the edit this placement came from (see Settings.PlacementUpdated).</summary>
     public long Updated { get; set; }
-    /// <summary>The user's own word for the desk ("Home", "Office A"); optional, local to this PC.</summary>
+    /// <summary>The user's word for the desk ("Home", "Office A"); optional. Shared with the other PC through the
+    /// handshake: whoever named it last wins, so both PCs call the desk the same.</summary>
     public string Name { get; set; } = "";
+    /// <summary>Unix ms when the name was last set, for the newest-wins sync.</summary>
+    public long NameUpdated { get; set; }
 }
 
 public sealed class Settings
@@ -78,8 +81,8 @@ public sealed class Settings
     public void RememberPlacement(string key)
     {
         if (PeerX is not int x || PeerY is not int y || !Layout.IsCompleteSetupKey(key)) return;
-        string name = Placements.TryGetValue(key, out var old) ? old.Name : "";
-        Placements[key] = new SavedPlacement { PeerX = x, PeerY = y, Updated = PlacementUpdated, Name = name };
+        Placements.TryGetValue(key, out var old);
+        Placements[key] = new SavedPlacement { PeerX = x, PeerY = y, Updated = PlacementUpdated, Name = old?.Name ?? "", NameUpdated = old?.NameUpdated ?? 0 };
     }
 
     /// <summary>After a few minutes without input, ping only every 10 s so the BLE link can idle (first move after that is slower).</summary>

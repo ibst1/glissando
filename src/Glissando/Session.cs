@@ -441,7 +441,8 @@ public sealed class Session : IDisposable
         RandomNumberGenerator.Fill(_myNonce);
         var layout = _capture.Layout;
         var hello = Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version,
-            (ushort)(_udp?.LocalPort ?? 0), _udp != null ? UdpPixelLink.LocalAddresses() : null));
+            (ushort)(_udp?.LocalPort ?? 0), _udp != null ? UdpPixelLink.LocalAddresses() : null,
+            _s.Placements.TryGetValue(_setupKey, out var desk) ? desk.Name : "", _s.Placements.TryGetValue(_setupKey, out var desk2) ? desk2.NameUpdated : 0));
         // The monitor layout travels in Hello. A display or settings change mid-session sends one Hello, and on
         // this lossy link a single packet can be lost, leaving the peer with a stale arrangement -- the two
         // dialogs then disagree and a corner monitor becomes unreachable. Send a few copies so the update
@@ -649,6 +650,18 @@ public sealed class Session : IDisposable
             _s.PlacementUpdated = hello.PlacementUpdated;
             _s.RememberPlacement(_setupKey);
             changed = true;
+        }
+        // The desk's name travels too: whoever named (or renamed) it last wins, so both PCs call it the same.
+        if (hello.DeskName != "" && Layout.IsCompleteSetupKey(_setupKey))
+        {
+            if (!_s.Placements.ContainsKey(_setupKey)) _s.RememberPlacement(_setupKey);
+            if (_s.Placements.TryGetValue(_setupKey, out var mine) && hello.DeskNameUpdated > mine.NameUpdated && hello.DeskName != mine.Name)
+            {
+                Log.Info($"desk name from {hello.Name}: \"{hello.DeskName}\"" + (mine.Name != "" ? $" (was \"{mine.Name}\")" : ""));
+                mine.Name = hello.DeskName;
+                mine.NameUpdated = hello.DeskNameUpdated;
+                changed = true;
+            }
         }
         if (!changed) return;
         RebuildLayout();
