@@ -1,6 +1,7 @@
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
+using Windows.Devices.Enumeration;
 using Windows.Storage.Streams;
 
 namespace Glissando.Transport;
@@ -43,28 +44,64 @@ public sealed class BleCentralChannel : IChannel
             {
                 TearDown();
             }
-            // After a failure on a connection that pre-dated us, give Windows time to drop it before trying
-            // again; re-acquiring it at once kept the stale link alive for minutes (2026-09-15).
-            int pause = _backoffMs > 0 ? _backoffMs : 1500;
-            _backoffMs = 0;
-            try { await Task.Delay(pause, ct); } catch (OperationCanceledException) { break; }
+            // A connection that pre-dated us and never carried a byte from the peer is a leftover from its
+            // previous process or from before sleep: its GATT server is gone, and Windows keeps the LE link up
+            // for as long as anyone holds it. Releasing it (TearDown) and re-acquiring 1.5 s later kept it
+            // alive for minutes (2-4 min per restart, 2026-09-15): the link went away only when a retry
+            // happened to leave it alone long enough. So wait until the radio really reports it gone.
+            if (_preConnected && !_gotRx && _staleDeviceId != null)
+            {
+                try { await WaitUntilRadioDropsAsync(_staleDeviceId, ct); } catch (OperationCanceledException) { break; }
+            }
+            try { await Task.Delay(1500, ct); } catch (OperationCanceledException) { break; }
         }
         TearDown();
     }
 
-    private int _backoffMs;
+    private bool _preConnected, _gotRx;
+    private string? _staleDeviceId;
 
     /// <summary>A GATT step failed. If the LE connection was already there when we looked the device up, it is
-    /// most likely a leftover from the peer's previous process or from before sleep, whose GATT server is gone:
-    /// release every reference (TearDown does) and wait so Windows actually drops it, then rediscover.</summary>
+    /// most likely a leftover whose GATT server is gone; the retry loop waits for Windows to drop it.</summary>
     private void FailedOnPossiblyStaleLink(string what, bool preConnected)
     {
-        if (preConnected)
-        {
-            Log.Warn($"BLE central: {what} on a pre-existing connection - releasing it so Windows drops the old link, retrying in 6 s");
-            _backoffMs = 6000;
-        }
+        if (preConnected) Log.Warn($"BLE central: {what} on a pre-existing connection - releasing it so Windows drops the old link");
         else Log.Warn($"BLE central: {what}");
+    }
+
+    /// <summary>Poll the device's connected state - through the enumeration property, which does not touch the
+    /// link - until Windows has dropped it, for at most 30 s. Holding a BluetoothLEDevice for the check would
+    /// keep the very link alive that we are waiting to see go.</summary>
+    private static async Task WaitUntilRadioDropsAsync(string deviceId, CancellationToken ct)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (sw.Elapsed < TimeSpan.FromSeconds(30))
+        {
+            bool? connected = await IsRadioConnectedAsync(deviceId);
+            if (connected != true)
+            {
+                Log.Info(connected == false
+                    ? $"BLE central: Windows dropped the old link after {sw.Elapsed.TotalSeconds:F1} s; reconnecting"
+                    : "BLE central: cannot read the link state; reconnecting");
+                return;
+            }
+            await Task.Delay(500, ct);
+        }
+        Log.Warn("BLE central: the old link is still up after 30 s (something else on this PC holds it?); reconnecting anyway");
+    }
+
+    private static async Task<bool?> IsRadioConnectedAsync(string deviceId)
+    {
+        try
+        {
+            var info = await DeviceInformation.CreateFromIdAsync(deviceId, new[] { "System.Devices.Aep.IsConnected" });
+            return info.Properties.TryGetValue("System.Devices.Aep.IsConnected", out var v) && v is bool b ? b : null;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("BLE central: link state lookup failed: " + ex.Message);
+            return null;
+        }
     }
 
     private async Task ConnectOnceAsync(CancellationToken ct)
@@ -78,6 +115,8 @@ public sealed class BleCentralChannel : IChannel
         _device = await BluetoothLEDevice.FromBluetoothAddressAsync(address);
         if (_device == null) { Log.Warn("FromBluetoothAddressAsync returned null"); return; }
         bool preConnected = _device.ConnectionStatus == BluetoothConnectionStatus.Connected;
+        _preConnected = preConnected; _gotRx = false; _staleDeviceId = _device.DeviceId;
+        _firstRx = new(TaskCreationOptions.RunContinuationsAsynchronously);
         if (preConnected) Log.Info("BLE central: the peer is already connected at the radio level (a link left over from before)");
         _device.ConnectionStatusChanged += (s, e) =>
         {
@@ -130,8 +169,25 @@ public sealed class BleCentralChannel : IChannel
         LinkChanged?.Invoke(true);
 
         using (ct.Register(() => _dropped?.TrySetResult()))
+        {
+            if (preConnected)
+            {
+                // The session sends Hello as soon as the link is up and a live peer answers within ~100 ms.
+                // Every GATT step above succeeds on a leftover link too - Windows' GATT server on the other
+                // PC answers discovery and takes the CCCD write - but the new GattServiceProvider there never
+                // hears of a client that connected before it existed, so nothing ever comes back. Give it 5 s.
+                await Task.WhenAny(_firstRx.Task, _dropped.Task, Task.Delay(5000, ct));
+                if (!_gotRx && !_dropped.Task.IsCompleted)
+                {
+                    Log.Warn("BLE central: no answer within 5 s on the pre-existing connection - it is stale; releasing it so Windows drops it");
+                    return;
+                }
+            }
             await _dropped.Task;
+        }
     }
+
+    private TaskCompletionSource _firstRx = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private async Task<ulong> ScanAsync(CancellationToken ct)
     {
@@ -162,6 +218,7 @@ public sealed class BleCentralChannel : IChannel
     {
         var data = new byte[args.CharacteristicValue.Length];
         DataReader.FromBuffer(args.CharacteristicValue).ReadBytes(data);
+        if (!_gotRx) { _gotRx = true; _firstRx.TrySetResult(); }
         Received?.Invoke(data);
     }
 
