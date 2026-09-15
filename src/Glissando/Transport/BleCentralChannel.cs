@@ -106,6 +106,16 @@ public sealed class BleCentralChannel : IChannel
         if (_rx == null || _tx == null) { FailedOnPossiblyStaleLink("rx/tx characteristics missing", preConnected); return; }
 
         _tx.ValueChanged += OnValueChanged;
+        // Windows keeps a bonded client's notify subscription (CCCD) across connections. When the peripheral's
+        // process restarts on a link that stayed up, the new GattLocalCharacteristic sees our "Notify" write as
+        // no change - the value was already Notify - and never raises SubscribedClientsChanged, so the peer
+        // believes nobody listens and drops every reply; from here the subscribe still reported Success. Writing
+        // None first makes the second write a real change (2026-09-15: six 15 s cycles before it took by chance).
+        if (preConnected)
+        {
+            try { await _tx.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.None); } catch { }
+            await Task.Delay(150, ct);
+        }
         var sub = await _tx.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify);
         if (sub != GattCommunicationStatus.Success) { FailedOnPossiblyStaleLink($"subscribe {sub}", preConnected); return; }
         _session.MaintainConnection = true;
