@@ -284,6 +284,8 @@ public sealed class Session : IDisposable
     public void Suspend()
     {
         Log.Info("system suspending; releasing the link and the radio");
+        SayGoodbye();
+        DrainSendQueue(300);
         SetAuthenticated(false);
         RttMs = 0;
         try { _channel.Sleep(); } catch (Exception ex) { Log.Warn("sleep: " + ex.Message); }
@@ -558,6 +560,16 @@ public sealed class Session : IDisposable
 
             case FrameType.Clipboard:
                 if (Authenticated) ReceiveClipboard(f);
+                break;
+
+            case FrameType.Bye:
+                // The peer is exiting or suspending. The central must release the LE link at once: a link it
+                // keeps holding survives the peer's GATT server by 30 s in Windows, and a new connection to the
+                // peer's next process cannot be made until it is gone (37 s restarts, 2026-09-15). The
+                // peripheral has nothing to release; the central's Windows drops the link when its process ends.
+                Log.Info($"{PeerName} says goodbye (exiting or sleeping)");
+                SetAuthenticated(false);
+                if (_channel.IsCentral) _channel.Reconnect();
                 break;
 
             case FrameType.Detached:
@@ -953,6 +965,7 @@ public sealed class Session : IDisposable
         _capture.Release();
         CursorHider.Restore();
         _injector.Deactivate();
+        SayGoodbye();
         DrainSendQueue(400);
         _cts.Cancel();
         _queue.Writer.TryComplete();
@@ -960,6 +973,15 @@ public sealed class Session : IDisposable
         _udp?.Dispose();
         _crypto?.Dispose();
         _cryptoUdp?.Dispose();
+    }
+
+    /// <summary>Tell an authenticated peer we are going, twice (Bye is not a reliable frame), so it drops the
+    /// link now instead of finding out from silence.</summary>
+    private void SayGoodbye()
+    {
+        if (!Authenticated || !Linked) return;
+        Send(Frame.Bye());
+        Send(Frame.Bye());
     }
 
     /// <summary>Wait, at most maxMs, for the sender loop to hand every queued frame to the channel. _queued

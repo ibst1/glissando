@@ -31,6 +31,7 @@ public enum FrameType : byte
     MirrorMouse = 22,   // kind(1: 1=down 2=up 3=wheel 4=hwheel) x(u16) y(u16) button(1) delta(i16): a click or wheel on the mirror
     MirrorKey = 23,     // vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key typed into the mirror
     UdpProbe = 24,      // empty; sent over the UDP pixel path to punch it through the firewalls and keep it up
+    Bye = 25,           // empty; the sender is exiting or going to sleep: drop the link now, do not wait for timeouts
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -84,6 +85,7 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     public long I64(int offset) => BinaryPrimitives.ReadInt64LittleEndian(Payload.AsSpan(offset));
 
     public static Frame Leave() => new(FrameType.Leave, []);
+    public static Frame Bye() => new(FrameType.Bye, []);
     public static Frame Status(bool locked) => new(FrameType.Status, [locked ? (byte)1 : (byte)0]);
 
     public static Frame MouseMove(int dx, int dy)
