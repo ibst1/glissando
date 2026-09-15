@@ -301,14 +301,14 @@ internal sealed class SettingsForm : Form
     {
         var page = Page("Setup", out var layout);
 
-        layout.Controls.Add(Header("1. Pair the PCs once"));
+        layout.Controls.Add(Header("1. Bluetooth"));
         _btInfo.Text = "Reading Bluetooth adapter...";
         layout.Controls.Add(_btInfo);
         var btRow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0, 2, 0, 8) };
         var btBtn = new Button { Text = "Open Bluetooth settings", AutoSize = true };
         btBtn.Click += (_, _) => TryStart("ms-settings:bluetooth");
         btRow.Controls.Add(btBtn);
-        btRow.Controls.Add(new Label { Text = "Keep the Bluetooth page open on both PCs while pairing.", AutoSize = true, Padding = new Padding(6, 6, 0, 0) });
+        btRow.Controls.Add(new Label { Text = "Bluetooth must be on on both PCs. Pairing them is not needed.", AutoSize = true, Padding = new Padding(6, 6, 0, 0) });
         layout.Controls.Add(btRow);
 
         layout.Controls.Add(Header("2. Passphrase (type the same one on the other PC)"));
@@ -619,7 +619,7 @@ internal sealed class SettingsForm : Form
             if (adapter == null) { _btInfo.Text = "No Bluetooth adapter found on this PC."; return; }
             var addr = string.Join(":", Enumerable.Range(0, 6).Select(i => ((adapter.BluetoothAddress >> (8 * (5 - i))) & 0xFF).ToString("X2")));
             string can = adapter.IsPeripheralRoleSupported ? "" : " This adapter cannot advertise, so the other PC must.";
-            _btInfo.Text = $"This PC is \"{Environment.MachineName}\" ({addr}). Pair it with the other PC in Windows Settings if you have not already.{can}";
+            _btInfo.Text = $"This PC is \"{Environment.MachineName}\" ({addr}).{can}";
         }
         catch (Exception ex)
         {

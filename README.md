@@ -22,9 +22,9 @@ makes the mouse rubbery.
 
 ## Setup
 
-1. Pair the two PCs once in Windows Settings (Bluetooth & devices, Add device,
-   with the Bluetooth page open on both so they are discoverable). The setup
-   dialog has a button that opens that page.
+1. Turn Bluetooth on on both PCs. Pairing them in Windows is not needed: the
+   link is a plain GATT connection, and the two PCs run unpaired. The setup
+   dialog has a button that opens the Bluetooth page.
 2. Run `Glissando.exe` on both PCs. The first run opens the setup dialog:
    generate a passphrase, type the same one on the other PC, and drag the
    blue screens to where the other PC physically stands. Until the PCs have
