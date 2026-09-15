@@ -43,9 +43,28 @@ public sealed class BleCentralChannel : IChannel
             {
                 TearDown();
             }
-            try { await Task.Delay(1500, ct); } catch (OperationCanceledException) { break; }
+            // After a failure on a connection that pre-dated us, give Windows time to drop it before trying
+            // again; re-acquiring it at once kept the stale link alive for minutes (2026-09-15).
+            int pause = _backoffMs > 0 ? _backoffMs : 1500;
+            _backoffMs = 0;
+            try { await Task.Delay(pause, ct); } catch (OperationCanceledException) { break; }
         }
         TearDown();
+    }
+
+    private int _backoffMs;
+
+    /// <summary>A GATT step failed. If the LE connection was already there when we looked the device up, it is
+    /// most likely a leftover from the peer's previous process or from before sleep, whose GATT server is gone:
+    /// release every reference (TearDown does) and wait so Windows actually drops it, then rediscover.</summary>
+    private void FailedOnPossiblyStaleLink(string what, bool preConnected)
+    {
+        if (preConnected)
+        {
+            Log.Warn($"BLE central: {what} on a pre-existing connection - releasing it so Windows drops the old link, retrying in 6 s");
+            _backoffMs = 6000;
+        }
+        else Log.Warn($"BLE central: {what}");
     }
 
     private async Task ConnectOnceAsync(CancellationToken ct)
@@ -58,34 +77,38 @@ public sealed class BleCentralChannel : IChannel
         _dropped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _device = await BluetoothLEDevice.FromBluetoothAddressAsync(address);
         if (_device == null) { Log.Warn("FromBluetoothAddressAsync returned null"); return; }
+        bool preConnected = _device.ConnectionStatus == BluetoothConnectionStatus.Connected;
+        if (preConnected) Log.Info("BLE central: the peer is already connected at the radio level (a link left over from before)");
         _device.ConnectionStatusChanged += (s, e) =>
         {
             Log.Info($"BLE connection {s.ConnectionStatus}");
             if (s.ConnectionStatus == BluetoothConnectionStatus.Disconnected) _dropped?.TrySetResult();
         };
 
+        // MaintainConnection is set only once the GATT server has answered (below): set before discovery it
+        // pinned a stale link whose server was gone, and the retry loop then re-acquired that same link.
         _session = await GattSession.FromDeviceIdAsync(_device.BluetoothDeviceId);
-        _session.MaintainConnection = true;
 
         var services = await _device.GetGattServicesForUuidAsync(BleIds.Service, BluetoothCacheMode.Uncached);
         if (services.Status != GattCommunicationStatus.Success || services.Services.Count == 0)
         {
-            Log.Warn($"service lookup {services.Status}");
+            FailedOnPossiblyStaleLink($"service lookup {services.Status}" + (services.Services.Count == 0 && services.Status == GattCommunicationStatus.Success ? " (service not found)" : ""), preConnected);
             return;
         }
         _service = services.Services[0];
         var chars = await _service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
-        if (chars.Status != GattCommunicationStatus.Success) { Log.Warn($"characteristics {chars.Status}"); return; }
+        if (chars.Status != GattCommunicationStatus.Success) { FailedOnPossiblyStaleLink($"characteristics {chars.Status}", preConnected); return; }
         foreach (var c in chars.Characteristics)
         {
             if (c.Uuid == BleIds.Rx) _rx = c;
             else if (c.Uuid == BleIds.Tx) _tx = c;
         }
-        if (_rx == null || _tx == null) { Log.Warn("rx/tx characteristics missing"); return; }
+        if (_rx == null || _tx == null) { FailedOnPossiblyStaleLink("rx/tx characteristics missing", preConnected); return; }
 
         _tx.ValueChanged += OnValueChanged;
         var sub = await _tx.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify);
-        if (sub != GattCommunicationStatus.Success) { Log.Warn($"subscribe {sub}"); return; }
+        if (sub != GattCommunicationStatus.Success) { FailedOnPossiblyStaleLink($"subscribe {sub}", preConnected); return; }
+        _session.MaintainConnection = true;
 
         // Connection parameters are left at Windows' default. The 2026-09-08 transport tests measured default
         // as the fastest here (~13 ms median); RequestPreferredConnectionParameters(ThroughputOptimized) was

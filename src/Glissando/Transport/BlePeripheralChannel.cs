@@ -112,7 +112,7 @@ public sealed class BlePeripheralChannel : IChannel
             DataReader.FromBuffer(req.Value).ReadBytes(data);
             Received?.Invoke(data);
         }
-        catch (Exception ex) { Log.Error("BLE write handler: " + ex.Message); }
+        catch (Exception ex) { Log.Error($"BLE write handler: {ex.GetType().Name} 0x{ex.HResult:X8} {ex.Message}"); }
         finally { deferral.Complete(); }
     }
 
