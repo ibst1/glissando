@@ -2,6 +2,7 @@ using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Enumeration;
+using Windows.Foundation;
 using Windows.Storage.Streams;
 
 namespace Glissando.Transport;
@@ -36,6 +37,13 @@ public sealed class BleCentralChannel : IChannel
                 await ConnectOnceAsync(ct);
             }
             catch (OperationCanceledException) { break; }
+            catch (TimeoutException ex)
+            {
+                // A GATT step that never answers: seen on a fresh connection right after the peer's own restart
+                // (52 s of silence until Windows dropped the link, 2026-09-15). Treat the link as stale below.
+                Log.Warn("BLE central: " + ex.Message + " - releasing the link so Windows drops it");
+                _hung = true;
+            }
             catch (Exception ex)
             {
                 Log.Warn("BLE central: " + ex.Message);
@@ -49,8 +57,9 @@ public sealed class BleCentralChannel : IChannel
             // for as long as anyone holds it. Releasing it (TearDown) and re-acquiring 1.5 s later kept it
             // alive for minutes (2-4 min per restart, 2026-09-15): the link went away only when a retry
             // happened to leave it alone long enough. So wait until the radio really reports it gone.
-            if (_preConnected && !_gotRx && _staleDeviceId != null)
+            if ((_hung || (_preConnected && !_gotRx)) && _staleDeviceId != null)
             {
+                _hung = false;
                 try { await WaitUntilRadioDropsAsync(_staleDeviceId, ct); } catch (OperationCanceledException) { break; }
             }
             try { await Task.Delay(1500, ct); } catch (OperationCanceledException) { break; }
@@ -58,7 +67,7 @@ public sealed class BleCentralChannel : IChannel
         TearDown();
     }
 
-    private bool _preConnected, _gotRx;
+    private bool _preConnected, _gotRx, _hung;
     private string? _staleDeviceId;
 
     /// <summary>A GATT step failed. If the LE connection was already there when we looked the device up, it is
@@ -104,6 +113,18 @@ public sealed class BleCentralChannel : IChannel
         }
     }
 
+    /// <summary>Await a GATT step with a 10 s limit. A step that hangs is a link that is not really there.</summary>
+    private static async Task<T> Step<T>(IAsyncOperation<T> op, string what, CancellationToken ct)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        try { return await op.AsTask(linked.Token); }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            throw new TimeoutException($"{what} did not answer within 10 s");
+        }
+    }
+
     private async Task ConnectOnceAsync(CancellationToken ct)
     {
         StatusChanged?.Invoke("scanning");
@@ -112,7 +133,7 @@ public sealed class BleCentralChannel : IChannel
 
         StatusChanged?.Invoke("connecting");
         _dropped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        _device = await BluetoothLEDevice.FromBluetoothAddressAsync(address);
+        _device = await Step(BluetoothLEDevice.FromBluetoothAddressAsync(address), "device lookup", ct);
         if (_device == null) { Log.Warn("FromBluetoothAddressAsync returned null"); return; }
         bool preConnected = _device.ConnectionStatus == BluetoothConnectionStatus.Connected;
         _preConnected = preConnected; _gotRx = false; _staleDeviceId = _device.DeviceId;
@@ -126,16 +147,16 @@ public sealed class BleCentralChannel : IChannel
 
         // MaintainConnection is set only once the GATT server has answered (below): set before discovery it
         // pinned a stale link whose server was gone, and the retry loop then re-acquired that same link.
-        _session = await GattSession.FromDeviceIdAsync(_device.BluetoothDeviceId);
+        _session = await Step(GattSession.FromDeviceIdAsync(_device.BluetoothDeviceId), "GATT session", ct);
 
-        var services = await _device.GetGattServicesForUuidAsync(BleIds.Service, BluetoothCacheMode.Uncached);
+        var services = await Step(_device.GetGattServicesForUuidAsync(BleIds.Service, BluetoothCacheMode.Uncached), "service lookup", ct);
         if (services.Status != GattCommunicationStatus.Success || services.Services.Count == 0)
         {
             FailedOnPossiblyStaleLink($"service lookup {services.Status}" + (services.Services.Count == 0 && services.Status == GattCommunicationStatus.Success ? " (service not found)" : ""), preConnected);
             return;
         }
         _service = services.Services[0];
-        var chars = await _service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
+        var chars = await Step(_service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached), "characteristics lookup", ct);
         if (chars.Status != GattCommunicationStatus.Success) { FailedOnPossiblyStaleLink($"characteristics {chars.Status}", preConnected); return; }
         foreach (var c in chars.Characteristics)
         {
@@ -152,10 +173,10 @@ public sealed class BleCentralChannel : IChannel
         // None first makes the second write a real change (2026-09-15: six 15 s cycles before it took by chance).
         if (preConnected)
         {
-            try { await _tx.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.None); } catch { }
+            try { await Step(_tx.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.None), "unsubscribe", ct); } catch (TimeoutException) { throw; } catch { }
             await Task.Delay(150, ct);
         }
-        var sub = await _tx.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify);
+        var sub = await Step(_tx.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify), "subscribe", ct);
         if (sub != GattCommunicationStatus.Success) { FailedOnPossiblyStaleLink($"subscribe {sub}", preConnected); return; }
         _session.MaintainConnection = true;
 
