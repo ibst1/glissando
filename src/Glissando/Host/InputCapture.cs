@@ -110,6 +110,8 @@ public sealed class InputCapture : IDisposable
         if (nCode < 0) return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
         int msg = (int)wParam;
         var info = Marshal.PtrToStructure<Native.MSLLHOOKSTRUCT>(lParam);
+        if (KeyLog && msg is Native.WM_MOUSEWHEEL or Native.WM_MOUSEHWHEEL)
+            Log.Info($"hook wheel msg=0x{msg:X} delta={unchecked((short)(info.mouseData >> 16))} flags=0x{info.flags:X} extra=0x{info.dwExtraInfo.ToInt64():X} remote={Remote}");
 
         // Crossing is detected from raw input (OnRawInput), which keeps firing when Windows has
         // clamped the cursor against the edge and the hook has stopped reporting new positions.
@@ -145,8 +147,8 @@ public sealed class InputCapture : IDisposable
             case Native.WM_MBUTTONUP: Button(3, false); break;
             case Native.WM_XBUTTONDOWN: Button((byte)(3 + (info.mouseData >> 16)), true); break;
             case Native.WM_XBUTTONUP: Button((byte)(3 + (info.mouseData >> 16)), false); break;
-            // Wheel is swallowed here (return 1 below) but forwarded from Raw Input in OnRawInput, which also
-            // catches a precision touchpad's scroll that never reaches this hook.
+            // Wheel is swallowed here (return 1 below) but forwarded from Raw Input in OnRawInput. A precision
+            // touchpad's scroll gets here only thanks to the ScrollCatcher window under the frozen cursor.
             case Native.WM_MOUSEWHEEL:
             case Native.WM_MOUSEHWHEEL:
                 break;
@@ -225,6 +227,15 @@ public sealed class InputCapture : IDisposable
         return 1;
     }
 
+    /// <summary>A wheel message that reached the ScrollCatcher window itself (normally the hook swallows the
+    /// input first and Raw Input forwards it; this is the fallback).</summary>
+    public void ForwardWheel(int delta, bool horizontal)
+    {
+        if (!Remote) return;
+        if (KeyLog) Log.Info($"catcher wheel delta={delta} horizontal={horizontal}");
+        Output?.Invoke(Frame.MouseWheel(delta, horizontal));
+    }
+
     /// <summary>Log every key forwarded and applied, to diagnose lost keystrokes. Enable with --keylog.</summary>
     public static bool KeyLog;
 
@@ -248,14 +259,16 @@ public sealed class InputCapture : IDisposable
         ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m));
         if ((flags & Native.MOUSE_MOVE_ABSOLUTE) != 0) return; // tablets/RDP: not supported yet
 
-        // Wheel comes from Raw Input, not the low-level hook: a precision touchpad's two-finger scroll bypasses
-        // WH_MOUSE_LL entirely (it would otherwise scroll the parked local cursor and never reach the peer).
-        // Raw Input sees the device directly. The hook still swallows a regular mouse's wheel but no longer
-        // forwards it, so the two sources never double. Wheel reports carry no movement, so handle it first.
+        // A mouse's wheel is forwarded from Raw Input; the hook swallows it (so it does not scroll a local
+        // window) but does not forward it, so the two never double. A precision touchpad's two-finger scroll
+        // only becomes wheel input when a plain Win32 window lies under the cursor - ScrollCatcher parks one
+        // there while remote - and then arrives here too. Wheel reports carry no movement, so handle it first.
         // Raw Input carries SendInput's dwExtraInfo as ulExtraInformation: our own injected wheel and moves
         // (the mirror scrolling a window on this PC) must not be forwarded to the peer on top.
         bool ours = got >= (uint)(m + 24) && BinaryPrimitives.ReadUInt32LittleEndian(_rawBuf.AsSpan(m + 20)) == (uint)Native.InjectTag.ToInt64();
         ushort buttonFlags = BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m + 4));
+        if (KeyLog && (buttonFlags & (Native.RI_MOUSE_WHEEL | Native.RI_MOUSE_HWHEEL)) != 0)
+            Log.Info($"raw wheel buttonFlags=0x{buttonFlags:X} delta={unchecked((short)BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m + 6)))} ours={ours} remote={Remote} hDevice=0x{BinaryPrimitives.ReadUInt64LittleEndian(_rawBuf.AsSpan(8)):X}");
         if ((buttonFlags & (Native.RI_MOUSE_WHEEL | Native.RI_MOUSE_HWHEEL)) != 0 && Remote && !ours)
         {
             short delta = unchecked((short)BinaryPrimitives.ReadUInt16LittleEndian(_rawBuf.AsSpan(m + 6)));

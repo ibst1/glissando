@@ -38,6 +38,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
 {
     private readonly Settings _settings;
     private readonly HiddenWindow _window = new();
+    private readonly ScrollCatcher _scrollCatcher = new();
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _status;
     private readonly Session _session;
@@ -104,6 +105,10 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _capture = new InputCapture(layout, _window.Handle);
         _window.RawInput += _capture.OnRawInput;
         _capture.Install();
+        // Touchpad scroll reaches no hook; a window under the frozen cursor catches it (see ScrollCatcher).
+        _scrollCatcher.Wheel += _capture.ForwardWheel;
+        _capture.EnteredRemote += () => { Native.GetCursorPos(out var p); _scrollCatcher.ShowAt(new Point(p.X, p.Y)); };
+        _capture.LeftRemote += _scrollCatcher.HideAway;
 
         _injector = new InputInjector(layout);
         _window.DisplayChanged += () => _session?.ScreenChanged();
