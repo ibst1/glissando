@@ -124,7 +124,9 @@ public sealed class BleAutoChannel : IChannel
                         if (pToken.IsCancellationRequested) return;
                         if (done == run) break;
                         if (cur.IsAdvertising || cur.IsLinked) { startedAt.Restart(); warned = false; continue; }
-                        if (!warned && startedAt.ElapsedMilliseconds > 15000)
+                        // An adapter that refuses to advertise (Aborted on every try) is not a stuck stack: this
+                        // PC connects instead, and it was told so while the peer was merely away for 15 s.
+                        if (!warned && startedAt.ElapsedMilliseconds > 15000 && !cur.AdvertisingRefused)
                         {
                             warned = true;
                             Log.Warn("BLE peripheral: still not advertising after 15 s (Bluetooth stack stuck? toggling Bluetooth off and on helps)");

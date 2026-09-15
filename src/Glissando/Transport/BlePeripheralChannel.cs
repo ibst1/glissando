@@ -19,6 +19,9 @@ public sealed class BlePeripheralChannel : IChannel
 
     private const int MaxAdvRestarts = 8;
     private int _advFails;
+    /// <summary>Windows answered StartAdvertising with Aborted/Stopped: this adapter refuses to advertise (the
+    /// central-only PC). Not a hang, so BleAutoChannel must not report the stack as stuck.</summary>
+    public bool AdvertisingRefused => _advFails > 0;
     private GattServiceProvider? _provider;
     private GattLocalCharacteristic? _rx, _tx;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
