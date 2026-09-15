@@ -104,6 +104,7 @@ public sealed class Session : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly byte[] _myNonce = new byte[16];
     private long _lastPeer, _lastSend, _lastHello;
+    private long _linkedSince;   // when the current link came up, for the stuck-handshake watchdog
     private long _lastActivePing, _lastRttLog;
     private double _lastRttLogged;
     private int _queued;
@@ -310,7 +311,11 @@ public sealed class Session : IDisposable
         for (int i = 0; i < 12; i++)
         {
             if (_cts.IsCancellationRequested || (Linked && Authenticated)) return;
-            _channel.Reconnect();
+            // Only nudge a link that is DOWN. Nudging a link that was up but not yet authenticated restarted the
+            // peripheral's advertising every 3 s, which kicked the central's fresh subscription each time and
+            // kept the handshake from ever finishing after a wake (2026-09-15). A stuck-but-linked handshake is
+            // the timer loop's job (15 s rule).
+            if (!Linked) _channel.Reconnect();
             try { await Task.Delay(3000, _cts.Token); } catch (OperationCanceledException) { return; }
         }
     }
@@ -416,6 +421,7 @@ public sealed class Session : IDisposable
     {
         Log.Info(up ? $"link up ({(_channel.IsCentral ? "central" : "peripheral")})" : "link down");
         RttMs = 0;
+        _linkedSince = Stopwatch.GetTimestamp();
         // A fresh connection restarts the reliable stream on both sides.
         ResetReliable();
         if (up)
@@ -794,6 +800,16 @@ public sealed class Session : IDisposable
                 {
                     Log.Warn($"no frames from peer for {sincePeer:F0} ms");
                     SetAuthenticated(false);
+                }
+
+                // Linked but the handshake never completes: one side is talking to a stale connection (the
+                // other PC's process restarted, or it slept and came back with a new GATT server - the peer
+                // kept "linked" for minutes after a wake, 2026-09-15). Reconnect, at most every 15 s.
+                if (Linked && !Authenticated && now - _linkedSince > Stopwatch.Frequency * 15)
+                {
+                    Log.Warn("linked for 15 s without authenticating; reconnecting");
+                    _linkedSince = now;
+                    _channel.Reconnect();
                 }
 
                 // The mirror of the controlled side's rule further down: while we control the other PC it

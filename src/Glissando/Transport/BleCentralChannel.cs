@@ -159,7 +159,17 @@ public sealed class BleCentralChannel : IChannel
             var w = new DataWriter();
             w.WriteBytes(packet);
             var st = await rx.WriteValueAsync(w.DetachBuffer(), GattWriteOption.WriteWithoutResponse);
-            return st == GattCommunicationStatus.Success;
+            if (st == GattCommunicationStatus.Success) { _writeFails = 0; return true; }
+            // The LE link can outlive the peer's GATT server (its process restarted, or it slept): Windows keeps
+            // reporting Connected while every write comes back Unreachable/ProtocolError, and we would sit in
+            // "linked" forever. A streak of failures is a dropped link: reconnect and find the fresh server.
+            if (++_writeFails >= 5)
+            {
+                Log.Warn($"BLE central: {_writeFails} writes failed in a row ({st}); treating the link as lost");
+                _writeFails = 0;
+                _dropped?.TrySetResult();
+            }
+            return false;
         }
         catch (Exception ex)
         {
@@ -169,6 +179,8 @@ public sealed class BleCentralChannel : IChannel
         }
         finally { _sendLock.Release(); }
     }
+
+    private int _writeFails;
 
     public void Reconnect() => _dropped?.TrySetResult();
 
