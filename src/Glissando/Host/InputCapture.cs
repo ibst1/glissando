@@ -41,6 +41,12 @@ public sealed class InputCapture : IDisposable
     private volatile bool _forwardKeys;
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _typedKeysDown = [];
 
+    // Keys whose DOWN was let through to this PC. Their UP must go the same way whatever mode we are in by then:
+    // a Shift pressed while the other PC's cursor was here, and released after it had left, had its release
+    // swallowed and forwarded -- Windows here never saw it, and Shift stayed down (2026-09-23). Same for a key
+    // held while crossing over with the trackpad.
+    private readonly HashSet<(ushort vk, ushort scan, bool ext)> _localKeysDown = [];
+
     /// <summary>"Keyboard follows the cursor", the active half: while true and not remote, every key typed on this
     /// PC is swallowed and sent as a TypedKey, which the other PC applies without a control session. The session
     /// keeps this in step with the link and with who controls whom (off while the other PC's cursor is on this
@@ -229,19 +235,22 @@ public sealed class InputCapture : IDisposable
                 if (BeingControlled && TakeBackArmed && !KeyboardFollowsCursor) LocalInputWhileControlled?.Invoke();
                 LocalActivity?.Invoke(null);
             }
-            // Keyboard follows the cursor, and the cursor is on the other PC: this key is for it. Our own
-            // injections (InjectTag) are for this PC, as in remote mode; a remapper's injections are forwarded.
-            if (_forwardKeys && info.dwExtraInfo != Native.InjectTag)
+            var tk = ((ushort)info.vkCode, (ushort)info.scanCode, ext);
+            lock (_modeGate)
             {
-                var tk = ((ushort)info.vkCode, (ushort)info.scanCode, ext);
-                lock (_modeGate)
+                // The release of a key this PC saw go down goes to this PC, even if the keyboard has since
+                // switched to the other PC.
+                if (up && _localKeysDown.Remove(tk)) return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
+                // Keyboard follows the cursor, and the cursor is on the other PC: this key is for it. Our own
+                // injections (InjectTag) are for this PC, as in remote mode; a remapper's injections are forwarded.
+                if (_forwardKeys && info.dwExtraInfo != Native.InjectTag)
                 {
-                    if (!_forwardKeys) return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
                     if (up) _typedKeysDown.Remove(tk); else _typedKeysDown.Add(tk);
+                    if (KeyLog) Log.Info($"typed key vk=0x{info.vkCode:X2} {(up ? "up  " : "down")} ext={ext} scan=0x{info.scanCode:X2}");
+                    Output?.Invoke(Frame.TypedKey(tk.Item1, tk.Item2, up, ext));
+                    return 1;
                 }
-                if (KeyLog) Log.Info($"typed key vk=0x{info.vkCode:X2} {(up ? "up  " : "down")} ext={ext} scan=0x{info.scanCode:X2}");
-                Output?.Invoke(Frame.TypedKey(tk.Item1, tk.Item2, up, ext));
-                return 1;
+                if (!up) _localKeysDown.Add(tk);
             }
             return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
         }
@@ -250,6 +259,8 @@ public sealed class InputCapture : IDisposable
         if (info.dwExtraInfo == Native.InjectTag) return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
 
         var key = ((ushort)info.vkCode, (ushort)info.scanCode, ext);
+        // A key that went down on this PC before we crossed over is released here, not on the other PC.
+        lock (_modeGate) if (up && _localKeysDown.Remove(key)) return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
 
         if (!up && info.vkCode == Native.VK_ESCAPE && LCtrlDown() && AltDown())
         {

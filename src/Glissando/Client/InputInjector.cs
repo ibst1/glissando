@@ -31,10 +31,37 @@ public sealed class InputInjector
     private readonly HashSet<byte> _buttonsDown = [];
     private readonly object _gate = new();
 
+    // When each held key was last pressed (or auto-repeated). A modifier the other PC really holds is re-sent
+    // by its keyboard auto-repeat several times a second, so one whose down has not been renewed in this long
+    // has had its release lost on the lossy link: drop it, or it would be re-asserted before every key from
+    // then on and everything typed here would be capitals (2026-09-23). Ordinary keys are left alone.
+    private const int StaleModifierMs = 2500;
+    private readonly Dictionary<(ushort vk, ushort scan, bool ext), long> _keyDownAt = [];
+    private readonly System.Threading.Timer _staleTimer;
+
     public InputInjector(Layout layout)
     {
         Layout = layout;
         _screen = Layout.MyVirtualScreen();
+        _staleTimer = new System.Threading.Timer(_ => ReleaseStaleModifiers(), null, 1000, 1000);
+    }
+
+    private void ReleaseStaleModifiers()
+    {
+        lock (_gate)
+        {
+            if (_keysDown.Count == 0) return;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            foreach (var k in _keysDown.ToArray())
+            {
+                if (k.vk == 0 || !Native.IsModifierVk(k.vk)) continue;
+                if (!_keyDownAt.TryGetValue(k, out long at) || now - at < System.Diagnostics.Stopwatch.Frequency * StaleModifierMs / 1000) continue;
+                Log.Info($"releasing modifier vk=0x{k.vk:X2} held without a repeat for {StaleModifierMs} ms (its release was lost)");
+                _keysDown.Remove(k);
+                _keyDownAt.Remove(k);
+                SendKey(k.vk, k.scan, up: true, k.ext);
+            }
+        }
     }
 
     public void ScreenChanged() => _screen = Layout.MyVirtualScreen();
@@ -138,7 +165,8 @@ public sealed class InputInjector
     private void Key(ushort vk, ushort scan, bool up, bool ext)
     {
         var key = (vk, scan, ext);
-        if (up) _keysDown.Remove(key); else _keysDown.Add(key);
+        if (up) { _keysDown.Remove(key); _keyDownAt.Remove(key); }
+        else { _keysDown.Add(key); _keyDownAt[key] = System.Diagnostics.Stopwatch.GetTimestamp(); }
         if (Host.InputCapture.KeyLog) Log.Info($"apply key vk=0x{vk:X2} {(up ? "up  " : "down")} ext={ext} scan=0x{scan:X2}");
 
         // An injected held modifier only sticks to the very next key, so a held Shift gave one capital then
@@ -175,6 +203,7 @@ public sealed class InputInjector
             foreach (var k in _keysDown.ToArray())
                 SendKey(k.vk, k.scan, up: true, k.ext);
             _keysDown.Clear();
+            _keyDownAt.Clear();
             foreach (var b in _buttonsDown.ToArray()) Button(b, false);
             _buttonsDown.Clear();
         }
