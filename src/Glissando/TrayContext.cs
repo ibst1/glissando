@@ -117,7 +117,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         {
             BleMode.Advertise => new BlePeripheralChannel(),
             BleMode.Connect => new BleCentralChannel(),
-            _ => new BleAutoChannel(),
+            _ => new BleAutoChannel(() => settings.BleLastRole, r => { settings.BleLastRole = r; settings.Save(); }),
         };
 
         _session = new Session(settings, channel, _capture, _injector, this);

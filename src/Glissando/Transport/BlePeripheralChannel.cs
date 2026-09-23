@@ -14,8 +14,11 @@ public sealed class BlePeripheralChannel : IChannel
     public bool IsLinked { get; private set; }
     public bool IsCentral => false;
 
-    /// <summary>True while Windows reports the advertisement as running.</summary>
-    public bool IsAdvertising => _provider?.AdvertisementStatus == GattServiceProviderAdvertisementStatus.Started;
+    /// <summary>True while Windows reports the advertisement as running. "Started without all advertisement
+    /// data" (a payload that did not fit) is still on the air: service data with the 128-bit service UUID gave
+    /// that status, and reading it as "not advertising" made this PC connect while it was advertising too.</summary>
+    public bool IsAdvertising => _provider?.AdvertisementStatus is GattServiceProviderAdvertisementStatus.Started
+        or GattServiceProviderAdvertisementStatus.StartedWithoutAllAdvertisementData;
 
     private const int MaxAdvRestarts = 8;
     private int _advFails;
@@ -33,22 +36,6 @@ public sealed class BlePeripheralChannel : IChannel
         if (adapter == null) { Fail("no Bluetooth adapter"); return; }
         Log.Info($"BLE adapter {adapter.BluetoothAddress:X12} peripheral={adapter.IsPeripheralRoleSupported} central={adapter.IsCentralRoleSupported}");
         if (!adapter.IsPeripheralRoleSupported) { Fail("adapter cannot advertise; set ble=connect on this PC"); return; }
-
-        // Carry the real adapter address in the advertisement (see BleIds.TieBreak): the address the peer sees
-        // the advertisement from is a random private one, useless for deciding who connects. Best effort: the
-        // property needs Windows 11 22H2, and if Windows will not start the advertisement with it, it is dropped.
-        try
-        {
-            if (Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(
-                    "Windows.Devices.Bluetooth.GenericAttributeProfile.GattServiceProviderAdvertisingParameters", "ServiceData"))
-            {
-                var w = new DataWriter();
-                w.WriteBytes(BleIds.TieBreak(adapter.BluetoothAddress));
-                _advParams.ServiceData = w.DetachBuffer();
-            }
-            else Log.Info("BLE advertising: this Windows cannot add service data; the peer decides who connects by the advertised address");
-        }
-        catch (Exception ex) { Log.Warn("BLE advertising: cannot add the adapter address to the advertisement: " + ex.Message); }
 
         var created = await GattServiceProvider.CreateAsync(BleIds.Service);
         if (created.Error != BluetoothError.Success) { Fail($"GattServiceProvider: {created.Error}"); return; }
@@ -102,12 +89,6 @@ public sealed class BlePeripheralChannel : IChannel
                 }
                 _advFails++;
                 Log.Warn($"BLE advertising is {st}; restarting ({_advFails}/{MaxAdvRestarts})");
-                if (_advFails == 2 && _advParams.ServiceData != null)
-                {
-                    // In case the service data is what the stack objects to: try once more without it.
-                    Log.Warn("BLE advertising: dropping the service data (adapter address) in case it is the reason");
-                    _advParams.ServiceData = null;
-                }
                 try { _provider.StartAdvertising(_advParams); }
                 catch (Exception ex) { Log.Error("StartAdvertising: " + ex.Message); }
             }

@@ -27,6 +27,12 @@ public sealed class Settings
     /// <summary>Which PC is the BLE peripheral. Auto: advertise if possible, and let the PC with the lower address connect.</summary>
     public BleMode Ble { get; set; } = BleMode.Auto;
 
+    /// <summary>What this PC did the last time the two linked in Auto mode: "connect" (it was the central) or
+    /// "wait" (the other PC connected to it). Both PCs remember their own side, so the next link starts at once
+    /// with the same roles. Nothing else is symmetric enough to decide: the address an advertisement is seen from
+    /// is a random private one Windows rotates, so comparing addresses gave the two PCs different answers.</summary>
+    public string BleLastRole { get; set; } = "";
+
     /// <summary>Where the other PC's virtual-screen origin sits, in this PC's pixels. Null = to the right of this desktop.</summary>
     public int? PeerX { get; set; }
     public int? PeerY { get; set; }

@@ -6,23 +6,35 @@ namespace Glissando.Transport;
 
 /// <summary>
 /// Decides at runtime which PC connects to which. Advertise if the adapter can, and scan at the
-/// same time. When the other PC's advertisement is seen, the PC that is not advertising
-/// successfully, or (if both are) the one with the lower Bluetooth address, becomes the
-/// central and connects. Both PCs apply the same rule, so exactly one of them connects.
+/// same time. When the other PC's advertisement is seen: a PC that is not advertising connects at
+/// once; so does a PC that connected the last time the two linked (Settings.BleLastRole, which both
+/// PCs remember for their own side, so the roles are fixed from the second link on). Otherwise it
+/// waits for the peer to connect, and if the peer has not within its patience -- 8 to 18 s,
+/// staggered by adapter address so the two never give up together -- connects anyway.
 ///
-/// "Lower address" means the real adapter addresses, which the advertisement carries in its service data
-/// (BleIds.TieBreak): the address an advertisement is seen from is a random private one Windows rotates, so
-/// comparing one's own real address with it gave the two PCs different answers -- both waited for the other
-/// (2026-09-23, once the second adapter had started advertising). A peer whose advertisement carries no address
-/// (older build, older Windows) is judged by the address it is seen from, as before; and whatever the rule
-/// says, a PC that has waited its patience out with the peer in plain view connects anyway. The patience is
-/// staggered by address so the two do not give up at the same moment.
+/// It used to compare Bluetooth addresses, its own against the one the peer's advertisement was seen
+/// from. That one is a random private address Windows rotates, so the two PCs compared different
+/// pairs, both concluded "the other has the lower address and should connect to us", and stood
+/// advertising at each other (2026-09-23, the first time the second adapter advertised at all).
+/// Putting the real address in the advertisement's service data does not fit next to the 128-bit
+/// service UUID (StartedWithoutAllAdvertisementData). Remembering the outcome needs nothing on the air.
 /// </summary>
 public sealed class BleAutoChannel : IChannel
 {
     public event Action<byte[]>? Received;
     public event Action<bool>? LinkChanged;
     public event Action<string>? StatusChanged;
+
+    private readonly Func<string> _lastRole;
+    private readonly Action<string> _rememberRole;
+
+    /// <param name="lastRole">Reads Settings.BleLastRole: "connect", "wait" or "".</param>
+    /// <param name="rememberRole">Stores it after a link comes up.</param>
+    public BleAutoChannel(Func<string> lastRole, Action<string> rememberRole)
+    {
+        _lastRole = lastRole;
+        _rememberRole = rememberRole;
+    }
 
     private IChannel? _active;
     private CancellationTokenSource? _runCts;   // cancels the current RunOnceAsync (sleep)
@@ -109,7 +121,7 @@ public sealed class BleAutoChannel : IChannel
                 detachP = Attach(p, up =>
                 {
                     // While someone is connected to us there is nothing to decide; resume scanning if they leave.
-                    if (up) waitingSince = null;
+                    if (up) { waitingSince = null; Remember("wait"); }
                     try { if (up) watcher.Stop(); else watcher.Start(); } catch { }
                 });
                 _active = p;
@@ -175,22 +187,20 @@ public sealed class BleAutoChannel : IChannel
         string why = "";
         long lastWaitLog = 0;
         int patienceMs = 8000 + (int)(myAddr % 11) * 1000; // 8-18 s, different on the two PCs
+        string role = _lastRole() ?? "";
         watcher.Received += (s, e) =>
         {
             if (e.BluetoothAddress == myAddr || e.BluetoothAddress == 0) return;
             if (p != null && p.IsLinked) return;
             if (p != null && started.ElapsedMilliseconds < 3000) return; // let our own advertising settle first
             bool advertising = p != null && p.IsAdvertising;
-            ulong? peerReal = ReadTieBreak(e.Advertisement);
-            ulong compare = peerReal ?? e.BluetoothAddress;
-            string peerDesc = peerReal is ulong r ? $"peer {e.BluetoothAddress:X12} (adapter {r:X12})" : $"peer {e.BluetoothAddress:X12} (no adapter address in its advertisement)";
             if (!advertising) { why = "not advertising"; decision.TrySetResult(e.BluetoothAddress); return; }
-            if (myAddr < compare) { why = "lower address"; decision.TrySetResult(e.BluetoothAddress); return; }
+            if (role == "connect") { why = "connected last time"; decision.TrySetResult(e.BluetoothAddress); return; }
             waitingSince ??= Stopwatch.StartNew();
             if (waitingSince.ElapsedMilliseconds > patienceMs)
             {
                 why = $"the peer did not connect within {patienceMs / 1000} s";
-                Log.Warn($"BLE auto: {peerDesc} should have connected to us but has not in {patienceMs / 1000} s; connecting ourselves");
+                Log.Warn($"BLE auto: peer {e.BluetoothAddress:X12} has not connected to us in {patienceMs / 1000} s; connecting ourselves");
                 decision.TrySetResult(e.BluetoothAddress);
                 return;
             }
@@ -198,7 +208,9 @@ public sealed class BleAutoChannel : IChannel
             if (now - lastWaitLog > 10000)
             {
                 lastWaitLog = now;
-                Log.Info($"BLE auto: {peerDesc} seen; it has the lower address and should connect to us (giving it {patienceMs / 1000} s)");
+                Log.Info($"BLE auto: peer {e.BluetoothAddress:X12} seen; " + (role == "wait"
+                    ? $"it connected to us last time, so it should again (giving it {patienceMs / 1000} s)"
+                    : $"first link between these two: waiting {patienceMs / 1000} s for it to connect before connecting ourselves"));
             }
         };
         // Scanning can be refused while the stack is not ready ("device not ready"): log, say so, try again.
@@ -239,26 +251,21 @@ public sealed class BleAutoChannel : IChannel
         }
 
         var c = new BleCentralChannel();
-        var detachC = Attach(c, null);
+        var detachC = Attach(c, up => { if (up) Remember("connect"); });
         _active = c;
         try { await c.RunAsync(ct); }
         finally { detachC(); try { c.Dispose(); } catch { } _active = null; }
     }
 
-    /// <summary>The advertiser's real adapter address, if its advertisement carries one (BleIds.TieBreak).</summary>
-    private static ulong? ReadTieBreak(BluetoothLEAdvertisement adv)
+    private void Remember(string role)
     {
         try
         {
-            foreach (var section in adv.DataSections)
-            {
-                var bytes = new byte[section.Data.Length];
-                Windows.Storage.Streams.DataReader.FromBuffer(section.Data).ReadBytes(bytes);
-                if (BleIds.ReadTieBreak(bytes) is ulong a) return a;
-            }
+            if (_lastRole() == role) return;
+            Log.Info($"BLE auto: remembering that this PC {(role == "connect" ? "connects" : "waits for the other PC to connect")}");
+            _rememberRole(role);
         }
-        catch { }
-        return null;
+        catch (Exception ex) { Log.Warn("BLE auto: could not remember the role: " + ex.Message); }
     }
 
     private Action Attach(IChannel ch, Action<bool>? onLink)
