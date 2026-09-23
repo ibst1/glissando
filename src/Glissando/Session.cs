@@ -103,6 +103,7 @@ public sealed class Session : IDisposable
     private readonly Channel<Frame> _queue = Channel.CreateUnbounded<Frame>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _cts = new();
     private readonly byte[] _myNonce = new byte[16];
+    private byte[]? _peerNonce; // the peer's last Hello nonce: a new one means a new Hello from it
     private long _lastPeer, _lastSend, _lastHello;
     private long _linkedSince;   // when the current link came up, for the stuck-handshake watchdog
     private long _lastActivePing, _lastRttLog;
@@ -539,6 +540,18 @@ public sealed class Session : IDisposable
                 if (hello.AppVersion != Program.Version) Log.Warn($"build mismatch: this PC {Program.Version}, {hello.Name} {hello.AppVersion}");
                 AdoptPeerInfo(hello);
                 if (_udp != null && hello.UdpPort != 0 && hello.UdpAddresses is { Length: > 0 } ua) _udp.SetCandidates(ua, hello.UdpPort);
+                // A Hello with a new nonce is a new SendHello on the peer: a restart, a re-auth, a settings or
+                // display change. Start its reliable stream afresh. A restarted peer numbers its frames from the
+                // start again, and if this side never saw the link drop (2026-09-23: the peripheral did not) the
+                // old window swallowed the new frames as duplicates: keys went missing, a Shift release among
+                // them, and Enter and Detached never landed, so control stuck for as long as the numbers overlapped.
+                // Resetting on a mere settings change costs at most one late duplicate of a key or click.
+                if (_peerNonce != null && !hello.Nonce.AsSpan(0, 16).SequenceEqual(_peerNonce))
+                {
+                    Log.Info($"new hello from {hello.Name}: restarting the reliable stream");
+                    ResetReliable();
+                }
+                _peerNonce = hello.Nonce.AsSpan(0, 16).ToArray();
                 Enqueue(Frame.HelloAck(hello.Nonce));
                 if (!Authenticated && Stopwatch.GetTimestamp() - _lastHello > Stopwatch.Frequency) SendHello();
                 break;
@@ -713,7 +726,9 @@ public sealed class Session : IDisposable
     // means that one sync did not take).
     private const int Redundancy = 3;
     private readonly object _relGate = new();
-    private ushort _relSeq;
+    // Starts somewhere random: a restart that numbered from 0 again ran straight into the window of numbers the
+    // peer had already seen from the previous run, whenever the peer had not noticed the link drop.
+    private ushort _relSeq = (ushort)Random.Shared.Next(65536);
     private readonly Queue<ushort> _dedupOrder = new();
     private readonly HashSet<ushort> _dedupSeen = [];
 
