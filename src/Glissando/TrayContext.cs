@@ -327,6 +327,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _settings.CaptureEnabled = working.CaptureEnabled;
         _settings.SyncClipboard = working.SyncClipboard;
         _settings.HideCursorWhileControlling = working.HideCursorWhileControlling;
+        _settings.KeyboardFollowsCursor = working.KeyboardFollowsCursor; // forgotten here at first, like the two below
         _settings.HideMirroredWindow = working.HideMirroredWindow;   // these two were never copied: the boxes looked dead
         _settings.PowerSaveWhenIdle = working.PowerSaveWhenIdle;
         _settings.UdpMirror = working.UdpMirror;
