@@ -9,6 +9,14 @@ namespace Glissando.Transport;
 /// same time. When the other PC's advertisement is seen, the PC that is not advertising
 /// successfully, or (if both are) the one with the lower Bluetooth address, becomes the
 /// central and connects. Both PCs apply the same rule, so exactly one of them connects.
+///
+/// "Lower address" means the real adapter addresses, which the advertisement carries in its service data
+/// (BleIds.TieBreak): the address an advertisement is seen from is a random private one Windows rotates, so
+/// comparing one's own real address with it gave the two PCs different answers -- both waited for the other
+/// (2026-09-23, once the second adapter had started advertising). A peer whose advertisement carries no address
+/// (older build, older Windows) is judged by the address it is seen from, as before; and whatever the rule
+/// says, a PC that has waited its patience out with the peer in plain view connects anyway. The patience is
+/// staggered by address so the two do not give up at the same moment.
 /// </summary>
 public sealed class BleAutoChannel : IChannel
 {
@@ -88,6 +96,7 @@ public sealed class BleAutoChannel : IChannel
         Action? detachP = null;
         var watcher = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
         watcher.AdvertisementFilter.Advertisement.ServiceUuids.Add(BleIds.Service);
+        Stopwatch? waitingSince = null; // the peer is in view and the rule says it should connect to us
 
         if (adapter.IsPeripheralRoleSupported)
         {
@@ -100,6 +109,7 @@ public sealed class BleAutoChannel : IChannel
                 detachP = Attach(p, up =>
                 {
                     // While someone is connected to us there is nothing to decide; resume scanning if they leave.
+                    if (up) waitingSince = null;
                     try { if (up) watcher.Stop(); else watcher.Start(); } catch { }
                 });
                 _active = p;
@@ -162,16 +172,34 @@ public sealed class BleAutoChannel : IChannel
 
         var decision = new TaskCompletionSource<ulong>(TaskCreationOptions.RunContinuationsAsynchronously);
         var started = Stopwatch.StartNew();
+        string why = "";
+        long lastWaitLog = 0;
+        int patienceMs = 8000 + (int)(myAddr % 11) * 1000; // 8-18 s, different on the two PCs
         watcher.Received += (s, e) =>
         {
             if (e.BluetoothAddress == myAddr || e.BluetoothAddress == 0) return;
             if (p != null && p.IsLinked) return;
             if (p != null && started.ElapsedMilliseconds < 3000) return; // let our own advertising settle first
             bool advertising = p != null && p.IsAdvertising;
-            if (!advertising || myAddr < e.BluetoothAddress)
+            ulong? peerReal = ReadTieBreak(e.Advertisement);
+            ulong compare = peerReal ?? e.BluetoothAddress;
+            string peerDesc = peerReal is ulong r ? $"peer {e.BluetoothAddress:X12} (adapter {r:X12})" : $"peer {e.BluetoothAddress:X12} (no adapter address in its advertisement)";
+            if (!advertising) { why = "not advertising"; decision.TrySetResult(e.BluetoothAddress); return; }
+            if (myAddr < compare) { why = "lower address"; decision.TrySetResult(e.BluetoothAddress); return; }
+            waitingSince ??= Stopwatch.StartNew();
+            if (waitingSince.ElapsedMilliseconds > patienceMs)
+            {
+                why = $"the peer did not connect within {patienceMs / 1000} s";
+                Log.Warn($"BLE auto: {peerDesc} should have connected to us but has not in {patienceMs / 1000} s; connecting ourselves");
                 decision.TrySetResult(e.BluetoothAddress);
-            else
-                Log.Info($"BLE auto: peer {e.BluetoothAddress:X12} seen; it has the lower address and should connect to us");
+                return;
+            }
+            long now = Environment.TickCount64;
+            if (now - lastWaitLog > 10000)
+            {
+                lastWaitLog = now;
+                Log.Info($"BLE auto: {peerDesc} seen; it has the lower address and should connect to us (giving it {patienceMs / 1000} s)");
+            }
         };
         // Scanning can be refused while the stack is not ready ("device not ready"): log, say so, try again.
         while (true)
@@ -201,8 +229,7 @@ public sealed class BleAutoChannel : IChannel
         }
         try { watcher.Stop(); } catch { }
 
-        Log.Info($"BLE auto: peer {peer:X12} seen; this PC ({myAddr:X12}) connects" +
-                 (p != null && p.IsAdvertising ? " (lower address)" : " (not advertising)"));
+        Log.Info($"BLE auto: peer {peer:X12} seen; this PC ({myAddr:X12}) connects ({why})");
         if (p != null)
         {
             pCts!.Cancel();
@@ -216,6 +243,22 @@ public sealed class BleAutoChannel : IChannel
         _active = c;
         try { await c.RunAsync(ct); }
         finally { detachC(); try { c.Dispose(); } catch { } _active = null; }
+    }
+
+    /// <summary>The advertiser's real adapter address, if its advertisement carries one (BleIds.TieBreak).</summary>
+    private static ulong? ReadTieBreak(BluetoothLEAdvertisement adv)
+    {
+        try
+        {
+            foreach (var section in adv.DataSections)
+            {
+                var bytes = new byte[section.Data.Length];
+                Windows.Storage.Streams.DataReader.FromBuffer(section.Data).ReadBytes(bytes);
+                if (BleIds.ReadTieBreak(bytes) is ulong a) return a;
+            }
+        }
+        catch { }
+        return null;
     }
 
     private Action Attach(IChannel ch, Action<bool>? onLink)
