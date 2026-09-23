@@ -33,6 +33,44 @@ public sealed class InputCapture : IDisposable
     /// <summary>True while the other PC is controlling this one (set by the session from the injector state).</summary>
     public volatile bool BeingControlled;
 
+    /// <summary>The setting "keyboard follows the cursor" (mirrors Settings.KeyboardFollowsCursor). With it, a key
+    /// typed while being controlled no longer takes this PC back: the other PC's cursor is here, so typing here
+    /// is the point. Its mouse still takes the machine back.</summary>
+    public volatile bool KeyboardFollowsCursor;
+
+    private volatile bool _forwardKeys;
+    private readonly HashSet<(ushort vk, ushort scan, bool ext)> _typedKeysDown = [];
+
+    /// <summary>"Keyboard follows the cursor", the active half: while true and not remote, every key typed on this
+    /// PC is swallowed and sent as a TypedKey, which the other PC applies without a control session. The session
+    /// keeps this in step with the link and with who controls whom (off while the other PC's cursor is on this
+    /// PC, so its keyboard then types here). The lock/jump hotkeys stay local. Turning it off releases on the
+    /// other PC whatever is still held, so a Shift held across the switch cannot stick there.</summary>
+    public bool ForwardKeys
+    {
+        get => _forwardKeys;
+        set
+        {
+            lock (_modeGate)
+            {
+                if (_forwardKeys == value) return;
+                _forwardKeys = value;
+                if (value)
+                {
+                    RaiseRemoteSignal(); // Sostenuto's CapsLock probe would be swallowed and forwarded, as when remote
+                    Log.Info("keyboard follows the cursor: keys now go to the other PC");
+                }
+                else
+                {
+                    foreach (var k in _typedKeysDown.ToArray()) Output?.Invoke(Frame.TypedKey(k.vk, k.scan, true, k.ext));
+                    _typedKeysDown.Clear();
+                    if (!Remote) ClearRemoteSignal();
+                    Log.Info("keyboard follows the cursor: keys now type on this PC");
+                }
+            }
+        }
+    }
+
     private long _takeBackAllowedAt;
     /// <summary>Ignore take-back briefly (e.g. right after control starts, while the cursor is being placed).</summary>
     public void SuppressTakeBack(int ms) => _takeBackAllowedAt = Stopwatch.GetTimestamp() + Stopwatch.Frequency * ms / 1000;
@@ -184,11 +222,26 @@ public sealed class InputCapture : IDisposable
                 JumpRequested?.Invoke();
                 return 1;
             }
-            // A real local keystroke while being controlled means the user wants this machine back.
             if (!up && (info.flags & Native.LLKHF_INJECTED) == 0)
             {
-                if (BeingControlled && TakeBackArmed) LocalInputWhileControlled?.Invoke();
+                // A real local keystroke while being controlled means the user wants this machine back -- unless
+                // the keyboard follows the cursor: then typing while the other PC's cursor is here is the point.
+                if (BeingControlled && TakeBackArmed && !KeyboardFollowsCursor) LocalInputWhileControlled?.Invoke();
                 LocalActivity?.Invoke(null);
+            }
+            // Keyboard follows the cursor, and the cursor is on the other PC: this key is for it. Our own
+            // injections (InjectTag) are for this PC, as in remote mode; a remapper's injections are forwarded.
+            if (_forwardKeys && info.dwExtraInfo != Native.InjectTag)
+            {
+                var tk = ((ushort)info.vkCode, (ushort)info.scanCode, ext);
+                lock (_modeGate)
+                {
+                    if (!_forwardKeys) return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
+                    if (up) _typedKeysDown.Remove(tk); else _typedKeysDown.Add(tk);
+                }
+                if (KeyLog) Log.Info($"typed key vk=0x{info.vkCode:X2} {(up ? "up  " : "down")} ext={ext} scan=0x{info.scanCode:X2}");
+                Output?.Invoke(Frame.TypedKey(tk.Item1, tk.Item2, up, ext));
+                return 1;
             }
             return Native.CallNextHookEx(_keyHook, nCode, wParam, lParam);
         }
@@ -332,7 +385,7 @@ public sealed class InputCapture : IDisposable
             // Close the door before anything else: a cursor still parked on the edge must not re-enter.
             _ignoreEdgeUntil = Stopwatch.GetTimestamp() + Stopwatch.Frequency / 4;
             Remote = false;
-            ClearRemoteSignal();
+            if (!_forwardKeys) ClearRemoteSignal(); // the keyboard may still be going to the other PC
             LeaveRemoteCore(back);
         }
         Log.Info("left remote");

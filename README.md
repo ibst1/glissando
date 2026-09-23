@@ -55,6 +55,14 @@ whichever PC's own mouse crosses the edge takes control of the other. Untick
 To take a machine back while it is being controlled, just move its own
 mouse or press a key on it.
 
+The mouse and the keyboard need not belong to the same PC. With a mouse
+paired to one PC and the keyboard you type on attached to the other, turn on
+*This PC's keyboard types where the cursor is* on the keyboard's PC. Its keys
+then go to the other PC whenever that PC's cursor is at home, and type locally
+while that cursor is over on the keyboard's PC; a key no longer takes the
+machine back in that state (the keyboard's PC's own mouse still does).
+**Ctrl+Alt+L** keeps the keyboard local until pressed again.
+
 The placement only needs to be set on one PC; the other adopts it (mirrored)
 when they connect. Whichever PC's placement was edited most recently wins.
 

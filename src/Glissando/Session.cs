@@ -169,6 +169,8 @@ public sealed class Session : IDisposable
         // handover (the peer has actually stopped) stays responsive.
         _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !LocalLocked && !PeerLocked
             && !_injector.Active && !PeerRecentlyInjected();
+        // Every state change (link, authentication, control, lock, settings) re-evaluates where the keyboard goes.
+        StateChanged += UpdateKeyForwarding;
 
         if (s.UdpMirror)
         {
@@ -206,6 +208,15 @@ public sealed class Session : IDisposable
             if (IsDuplicate(f)) return;
             HandleApp(f);
         }
+    }
+
+    /// <summary>"Keyboard follows the cursor": this PC's keys go to the other PC only while linked and
+    /// authenticated, neither side locked, and the other PC's cursor not on this PC (then they type here).
+    /// While this PC controls the other, the ordinary remote path carries the keys instead.</summary>
+    private void UpdateKeyForwarding()
+    {
+        _capture.KeyboardFollowsCursor = _s.KeyboardFollowsCursor;
+        _capture.ForwardKeys = _s.KeyboardFollowsCursor && Authenticated && !Locked && !LocalLocked && !PeerLocked && !_injector.Active;
     }
 
     private bool PeerRecentlyInjected()
@@ -253,7 +264,7 @@ public sealed class Session : IDisposable
         sb.AppendLine($"Glissando {Program.VersionLong} on {Environment.MachineName}, {Environment.OSVersion}, {DateTime.Now:yyyy-MM-dd HH:mm:ss}; peer build: {(string.IsNullOrEmpty(PeerVersion) ? "unknown" : PeerVersion)}");
         sb.AppendLine($"Bluetooth: {adapterInfo}");
         sb.AppendLine($"Transport: {TransportStatus}; linked={Linked} role={(Linked ? (_channel.IsCentral ? "central" : "peripheral") : "-")} authenticated={Authenticated} peer='{PeerName}' rtt={RttMs:F0} ms");
-        sb.AppendLine($"State: controlling={Controlling} controlled={Controlled} locked={Locked} sessionLocked={LocalLocked} peerLocked={PeerLocked} powerSaving={_powerSaving} peerPowerSaving={PeerPowerSaving} idle={Native.IdleMs() / 1000} s");
+        sb.AppendLine($"State: controlling={Controlling} controlled={Controlled} keysForwarded={_capture.ForwardKeys} locked={Locked} sessionLocked={LocalLocked} peerLocked={PeerLocked} powerSaving={_powerSaving} peerPowerSaving={PeerPowerSaving} idle={Native.IdleMs() / 1000} s");
         sb.AppendLine($"Counters: movesForwarded={Interlocked.Read(ref _capture.MovesForwarded)} rejectedPackets={Rejected} queued={Volatile.Read(ref _queued)} dedupSeen={_dedupSeen.Count}");
         sb.AppendLine(_udp == null ? "UDP pixel path: off" : $"UDP pixel path: port {_udp.LocalPort} up={_udp.Up} peer={_udp.Peer?.ToString() ?? "-"} sent={_udp.SentBytes / 1024} kB received={_udp.ReceivedBytes / 1024} kB");
         sb.AppendLine($"Settings: ble={_s.Ble} capture={_s.CaptureEnabled} clipboard={_s.SyncClipboard} hideCursor={_s.HideCursorWhileControlling} powerSave={_s.PowerSaveWhenIdle} keepalive={_s.KeepaliveMs} timeout={_s.PeerTimeoutMs} passphrase={(string.IsNullOrEmpty(_s.Passphrase) ? "(empty)" : $"set, {_s.Passphrase.Length} chars")} placementUpdated={_s.PlacementUpdated}");
@@ -616,6 +627,11 @@ public sealed class Session : IDisposable
                 _injector.Apply(f);
                 break;
 
+            case FrameType.TypedKey:
+                // The other PC's keyboard follows the cursor, and the cursor is here.
+                if (Authenticated) _injector.ApplyTypedKey(f);
+                break;
+
             case FrameType.MirrorPointer:
             case FrameType.MirrorMouse:
             case FrameType.MirrorKey:
@@ -701,7 +717,7 @@ public sealed class Session : IDisposable
     private readonly Queue<ushort> _dedupOrder = new();
     private readonly HashSet<ushort> _dedupSeen = [];
 
-    private static bool IsReliableType(FrameType t) => t is FrameType.Key or FrameType.MouseButton
+    private static bool IsReliableType(FrameType t) => t is FrameType.Key or FrameType.TypedKey or FrameType.MouseButton
         or FrameType.Enter or FrameType.Leave or FrameType.ReturnEdge or FrameType.Detached or FrameType.Status
         or FrameType.MirrorMouse or FrameType.MirrorKey;   // a click or key into a mirror must land; pointer moves may not
 
@@ -947,6 +963,7 @@ public sealed class Session : IDisposable
             if (LocalLocked) return $"This session is locked{rtt}";
             if (PeerLocked) return $"{peer} is locked; unlock it with its own keyboard{rtt}";
             if (Locked) return $"Cursor locked to this PC (Ctrl+Alt+L unlocks){rtt}";
+            if (_capture.ForwardKeys) return $"Linked to {peer}{rtt}; this keyboard types on {PeerName}";
             return _s.CaptureEnabled
                 ? $"Ready, linked to {peer}{rtt}"
                 : $"Ready, linked to {peer}{rtt} (this PC does not take control)";

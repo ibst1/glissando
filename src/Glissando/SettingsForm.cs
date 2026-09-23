@@ -203,7 +203,7 @@ internal sealed class SettingsForm : Form
     private readonly PlacementCanvas _canvas = new() { Dock = DockStyle.Fill };
     private readonly NumericUpDown _peerX = new() { Minimum = -30000, Maximum = 30000, Width = 80 };
     private readonly NumericUpDown _peerY = new() { Minimum = -30000, Maximum = 30000, Width = 80 };
-    private readonly CheckBox _capture = new(), _clip = new(), _autostart = new(), _hideCursor = new(), _hideMirror = new(), _udpMirror = new(), _powerSave = new();
+    private readonly CheckBox _capture = new(), _clip = new(), _autostart = new(), _hideCursor = new(), _keysFollow = new(), _hideMirror = new(), _udpMirror = new(), _powerSave = new();
     private readonly ComboBox _ble = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
     private readonly Label _btInfo = new() { AutoSize = true, MaximumSize = new Size(460, 0) };
     private readonly Label _setupNow = new() { AutoSize = true, MaximumSize = new Size(460, 0) };
@@ -428,6 +428,8 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(Option(_capture, "This PC's mouse and keyboard may control the other PC"));
         layout.Controls.Add(Option(_clip, "Copy clipboard text across when the cursor crosses"));
         layout.Controls.Add(Option(_hideCursor, "Hide this PC's cursor while controlling the other PC (swaps the system cursors; restored on return, and on next start if Glissando is ever killed while they are hidden)"));
+        _keysFollow.Checked = working.KeyboardFollowsCursor;
+        layout.Controls.Add(Option(_keysFollow, "This PC's keyboard types where the cursor is. For a mouse that belongs to the other PC: keys typed here go there whenever its cursor is at home, and type here while its cursor is on this PC (a key then no longer takes this PC back; moving this PC's own mouse still does). Ctrl+Alt+L keeps the keyboard here."));
 
         layout.Controls.Add(Header("Window mirroring"));
         _hideMirror.Checked = working.HideMirroredWindow;
@@ -603,6 +605,7 @@ internal sealed class SettingsForm : Form
         _s.CaptureEnabled = _capture.Checked;
         _s.SyncClipboard = _clip.Checked;
         _s.HideCursorWhileControlling = _hideCursor.Checked;
+        _s.KeyboardFollowsCursor = _keysFollow.Checked;
         _s.HideMirroredWindow = _hideMirror.Checked;
         _s.UdpMirror = _udpMirror.Checked;
         _s.PowerSaveWhenIdle = _powerSave.Checked;

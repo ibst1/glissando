@@ -75,6 +75,15 @@ public sealed class InputInjector
         }
     }
 
+    /// <summary>A key from the other PC's keyboard that follows the cursor: applied whether or not that PC controls
+    /// us -- its cursor is at home here, so its typing belongs here. Not control input: it neither refreshes the
+    /// "peer is controlling us" clock nor counts as a desync. Anything still held is released with the rest.</summary>
+    public void ApplyTypedKey(Frame f)
+    {
+        lock (_gate)
+            if (f.Payload.Length >= 5) Key(f.U16(0), f.U16(2), (f.Payload[4] & 1) != 0, (f.Payload[4] & 2) != 0);
+    }
+
     /// <summary>Refresh the "peer is still controlling us" clock (Enter and each ControlAlive heartbeat).</summary>
     public void KeepAlive() => LastInputTicks = System.Diagnostics.Stopwatch.GetTimestamp();
 

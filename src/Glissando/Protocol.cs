@@ -32,6 +32,7 @@ public enum FrameType : byte
     MirrorKey = 23,     // vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key typed into the mirror
     UdpProbe = 24,      // empty; sent over the UDP pixel path to punch it through the firewalls and keep it up
     Bye = 25,           // empty; the sender is exiting or going to sleep: drop the link now, do not wait for timeouts
+    TypedKey = 26,      // vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key from the other PC's keyboard that follows the cursor; applied without a control session
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -114,6 +115,9 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         p[4] = (byte)((up ? 1 : 0) | (extended ? 2 : 0));
         return new(FrameType.Key, p);
     }
+
+    /// <summary>Same layout as Key, but applied by the receiver whether or not it is being controlled.</summary>
+    public static Frame TypedKey(ushort vk, ushort scan, bool up, bool extended) => new(FrameType.TypedKey, Key(vk, scan, up, extended).Payload);
 
     public static Frame Enter(Crossing c) => CrossingFrame(FrameType.Enter, c);
     public static Frame ReturnEdge(Crossing c) => CrossingFrame(FrameType.ReturnEdge, c);

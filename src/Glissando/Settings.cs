@@ -50,6 +50,11 @@ public sealed class Settings
     /// <summary>Swap the system cursors for blank ones while this PC controls the other; restored on return.</summary>
     public bool HideCursorWhileControlling { get; set; }
 
+    /// <summary>This PC's keyboard types where the cursor is. For a mouse that belongs to the other PC: keys typed
+    /// here go to the other PC whenever its cursor is at home there, and type here while its cursor is on this PC
+    /// (a key then no longer takes this PC back; its mouse still does). Ctrl+Alt+L keeps the keyboard here.</summary>
+    public bool KeyboardFollowsCursor { get; set; }
+
     /// <summary>Make a window invisible on this PC while it is mirrored to the other one; it shows again when the
     /// mirror stops, or as soon as someone clicks or types on this PC.</summary>
     public bool HideMirroredWindow { get; set; } = true;
