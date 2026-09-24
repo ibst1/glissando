@@ -33,6 +33,7 @@ public enum FrameType : byte
     UdpProbe = 24,      // empty; sent over the UDP pixel path to punch it through the firewalls and keep it up
     Bye = 25,           // empty; the sender is exiting or going to sleep: drop the link now, do not wait for timeouts
     TypedKey = 26,      // vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key from the other PC's keyboard that follows the cursor; applied without a control session
+    ClipboardImage = 27, // id(1) index(u16) total(u16) + a chunk of a PNG or JPEG: the clipboard's picture (a screenshot), best effort
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -266,6 +267,22 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
             p[0] = id; p[1] = (byte)i; p[2] = (byte)total;
             bytes.AsSpan(i * chunk, len).CopyTo(p.AsSpan(3));
             yield return new Frame(FrameType.Clipboard, p);
+        }
+    }
+
+    /// <summary>An encoded picture in chunks of <paramref name="chunk"/> bytes (400 fits a BLE write, 1200 a datagram).</summary>
+    public static IEnumerable<Frame> ClipboardImage(byte id, byte[] data, int chunk)
+    {
+        int total = Math.Max(1, (data.Length + chunk - 1) / chunk);
+        for (int i = 0; i < total; i++)
+        {
+            int len = Math.Min(chunk, data.Length - i * chunk);
+            var p = new byte[5 + len];
+            p[0] = id;
+            BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(1), (ushort)i);
+            BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(3), (ushort)total);
+            data.AsSpan(i * chunk, len).CopyTo(p.AsSpan(5));
+            yield return new Frame(FrameType.ClipboardImage, p);
         }
     }
 }

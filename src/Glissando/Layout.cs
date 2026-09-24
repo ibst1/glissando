@@ -377,13 +377,45 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         }
         var v = Native.VirtualScreen();
         var ids = MonitorIdentity.Query();
-        var list = Screen.AllScreens
+        var list = LiveScreens()
             .Select((s, i) => new MonitorRect(
-                new Rectangle(s.Bounds.X - v.X, s.Bounds.Y - v.Y, s.Bounds.Width, s.Bounds.Height),
-                DisplayNumber(s.DeviceName, i + 1),
-                ids.TryGetValue(s.DeviceName, out var info) ? info.Id : ""))
+                new Rectangle(s.bounds.X - v.X, s.bounds.Y - v.Y, s.bounds.Width, s.bounds.Height),
+                DisplayNumber(s.device, i + 1),
+                ids.TryGetValue(s.device, out var info) ? info.Id : ""))
             .ToArray();
         return list.Length > 0 ? list : [new MonitorRect(new Rectangle(0, 0, v.Width, v.Height), 1)];
+    }
+
+    /// <summary>The monitors straight from Windows (EnumDisplayMonitors) rather than WinForms' Screen.AllScreens,
+    /// which is a cache refreshed by a display-change notice that a tray app with no visible window does not
+    /// always get: the other PC kept reporting one monitor of four for hours after waking (2026-09-24).</summary>
+    private static List<(Rectangle bounds, string device)> LiveScreens()
+    {
+        var list = new List<(Rectangle, string)>();
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (h, _, _, _) =>
+        {
+            var mi = new MONITORINFOEX { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<MONITORINFOEX>() };
+            if (GetMonitorInfoW(h, ref mi))
+                list.Add((Rectangle.FromLTRB(mi.rcMonitor.Left, mi.rcMonitor.Top, mi.rcMonitor.Right, mi.rcMonitor.Bottom), mi.szDevice ?? ""));
+            return true;
+        }, IntPtr.Zero);
+        return list;
+    }
+
+    private delegate bool MonitorEnumProc(IntPtr hMonitor, IntPtr hdc, IntPtr rect, IntPtr data);
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc proc, IntPtr data);
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern bool GetMonitorInfoW(IntPtr hMonitor, ref MONITORINFOEX info);
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private struct MONITORINFOEX
+    {
+        public int cbSize;
+        public RECT rcMonitor, rcWork;
+        public uint dwFlags;
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
     }
 
     /// <summary>The virtual screen this PC's monitor coordinates are relative to (fake layouts have none).</summary>

@@ -88,7 +88,11 @@ Glissando.exe --ble connect --console pin the Bluetooth role, show the log
   touchpad's two-finger scroll does not cross**, because Windows delivers it as
   digitizer input that neither the low-level mouse hook nor mouse Raw Input sees.
   Scroll the other PC with a mouse wheel or the keyboard (PageUp/PageDown, arrows).
-* Clipboard text is copied across each time the cursor crosses over.
+* The clipboard is copied across each time the cursor crosses over: text, or
+  else a picture (a Win+Shift+S screenshot). Over the network path a picture
+  of any size goes in a moment; over Bluetooth alone it is sent as PNG up to
+  300 kB, as JPEG above that, and not at all if still bigger, since it would
+  take longer than anyone waits.
 * A **Bluetooth mouse or keyboard on the controlling PC shares this one Bluetooth
   radio with Glissando.** While you move such a mouse it floods the radio with its
   own reports and the link to the other PC stutters, felt as lag in the direction
@@ -102,7 +106,10 @@ Glissando.exe --ble connect --console pin the Bluetooth role, show the log
   monitors numbered as in Windows Display settings on each PC, snaps the
   other PC flush against your edges, and marks every crossing in green. The
   monitor layouts travel in the handshake, so the placement only has to be
-  drawn on one PC.
+  drawn on one PC. Once a minute each PC re-checks its own monitors and
+  re-sends its layout, so a display change that Windows reported late (a
+  dock waking up) or a lost handshake packet cannot leave the other PC with
+  a stale arrangement for long.
 * Not possible without administrator rights on the controlled PC: typing into
   UAC prompts, elevated windows, or the lock screen. Unlock it with its own
   keyboard.

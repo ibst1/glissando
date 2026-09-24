@@ -12,6 +12,13 @@ public interface IClipboardAccess
 {
     string? GetText();
     void SetText(string text);
+
+    /// <summary>The clipboard's picture as PNG, or as JPEG if the PNG is over <paramref name="maxBytes"/>; null
+    /// when there is no picture (or text is present, which travels instead) or it is too big even as JPEG.</summary>
+    byte[]? GetImage(int maxBytes);
+
+    /// <summary>Put an encoded picture (PNG or JPEG) on the clipboard.</summary>
+    void SetImage(byte[] encoded);
 }
 
 /// <summary>
@@ -106,7 +113,8 @@ public sealed class Session : IDisposable
     private byte[]? _peerNonce; // the peer's last Hello nonce: a new one means a new Hello from it
     private long _lastPeer, _lastSend, _lastHello;
     private long _linkedSince;   // when the current link came up, for the stuck-handshake watchdog
-    private long _lastActivePing, _lastRttLog;
+    private long _lastActivePing, _lastRttLog, _lastPeriodicHello;
+    private string _lastHelloSummary = "";
     private double _lastRttLogged;
     private int _queued;
     private byte _clipId;
@@ -536,8 +544,14 @@ public sealed class Session : IDisposable
                 }
                 PeerName = hello.Name;
                 PeerVersion = hello.AppVersion;
-                Log.Info($"hello from {hello.Name} [{hello.AppVersion}]: capture={hello.CaptureEnabled} ourOriginThere={hello.PeerOrigin} screen={hello.Screen.Width}x{hello.Screen.Height} monitors={hello.Monitors.Length} updated={hello.PlacementUpdated}");
-                if (hello.AppVersion != Program.Version) Log.Warn($"build mismatch: this PC {Program.Version}, {hello.Name} {hello.AppVersion}");
+                // Hello now also comes once a minute as a refresh; log it only when it says something new.
+                string summary = $"hello from {hello.Name} [{hello.AppVersion}]: capture={hello.CaptureEnabled} ourOriginThere={hello.PeerOrigin} screen={hello.Screen.Width}x{hello.Screen.Height} monitors={hello.Monitors.Length} updated={hello.PlacementUpdated}";
+                if (summary != _lastHelloSummary)
+                {
+                    _lastHelloSummary = summary;
+                    Log.Info(summary);
+                    if (hello.AppVersion != Program.Version) Log.Warn($"build mismatch: this PC {Program.Version}, {hello.Name} {hello.AppVersion}");
+                }
                 AdoptPeerInfo(hello);
                 if (_udp != null && hello.UdpPort != 0 && hello.UdpAddresses is { Length: > 0 } ua) _udp.SetCandidates(ua, hello.UdpPort);
                 // A Hello with a new nonce is a new SendHello on the peer: a restart, a re-auth, a settings or
@@ -546,11 +560,7 @@ public sealed class Session : IDisposable
                 // old window swallowed the new frames as duplicates: keys went missing, a Shift release among
                 // them, and Enter and Detached never landed, so control stuck for as long as the numbers overlapped.
                 // Resetting on a mere settings change costs at most one late duplicate of a key or click.
-                if (_peerNonce != null && !hello.Nonce.AsSpan(0, 16).SequenceEqual(_peerNonce))
-                {
-                    Log.Info($"new hello from {hello.Name}: restarting the reliable stream");
-                    ResetReliable();
-                }
+                if (_peerNonce != null && !hello.Nonce.AsSpan(0, 16).SequenceEqual(_peerNonce)) ResetReliable();
                 _peerNonce = hello.Nonce.AsSpan(0, 16).ToArray();
                 Enqueue(Frame.HelloAck(hello.Nonce));
                 if (!Authenticated && Stopwatch.GetTimestamp() - _lastHello > Stopwatch.Frequency) SendHello();
@@ -584,6 +594,10 @@ public sealed class Session : IDisposable
 
             case FrameType.Clipboard:
                 if (Authenticated) ReceiveClipboard(f);
+                break;
+
+            case FrameType.ClipboardImage:
+                if (Authenticated) ReceiveClipboardImage(f);
                 break;
 
             case FrameType.Bye:
@@ -910,6 +924,23 @@ public sealed class Session : IDisposable
                     _injector.Deactivate();
                 }
 
+                // Once a minute, make sure both sides still agree on the screens. A display change can be missed
+                // here (Windows' notice arriving while the link was down, or not at all), and the Hello that
+                // carries one can be lost; the peer then keeps a stale monitor list, and a crossing works in one
+                // direction only (2026-09-24: the peer showed one of this PC's four monitors for hours).
+                // Re-enumerate: if it differs, treat it as a display change; else just re-send Hello.
+                if (Authenticated && now - _lastPeriodicHello > Stopwatch.Frequency * 60)
+                {
+                    _lastPeriodicHello = now;
+                    var live = Layout.MyMonitors();
+                    if (!live.SequenceEqual(_capture.Layout.Mine))
+                    {
+                        Log.Info($"display change missed: {_capture.Layout.Mine.Length} -> {live.Length} monitors; rebuilding the layout and telling {PeerName}");
+                        ScreenChanged();
+                    }
+                    else SendHello();
+                }
+
                 if (!Authenticated && sinceHello > 2000) SendHello();
                 else if (sinceSend > keepalive) Enqueue(Frame.Ping(now));
             }
@@ -924,16 +955,60 @@ public sealed class Session : IDisposable
         try
         {
             var text = _clipboard.GetText();
-            if (string.IsNullOrEmpty(text)) return;
-            if (text.Length > 60_000) text = text[..60_000];
-            // Don't resend an unchanged clipboard on every crossing; a big one clogs the slow link.
-            if (text == _lastClipboardSent) return;
-            _lastClipboardSent = text;
-            byte id = ++_clipId;
-            foreach (var chunk in Frame.ClipboardText(id, text)) Enqueue(chunk); // best-effort, not multiplied
-            Log.Info($"clipboard sent ({text.Length} chars)");
+            if (!string.IsNullOrEmpty(text))
+            {
+                if (text.Length > 60_000) text = text[..60_000];
+                // Don't resend an unchanged clipboard on every crossing; a big one clogs the slow link.
+                if (text == _lastClipboardSent) return;
+                _lastClipboardSent = text;
+                byte id = ++_clipId;
+                foreach (var chunk in Frame.ClipboardText(id, text)) Enqueue(chunk); // best-effort, not multiplied
+                Log.Info($"clipboard sent ({text.Length} chars)");
+                return;
+            }
+            // No text: a picture, then? Win+Shift+S puts only a bitmap on the clipboard (2026-09-24). Over the
+            // UDP path any screenshot goes in a moment; over Bluetooth it has to stay small enough to arrive
+            // within seconds, so a big one is sent as JPEG and a huge one not at all.
+            bool udp = _udp is { Up: true };
+            var picture = _clipboard.GetImage(udp ? 8_000_000 : BleImageLimit);
+            if (picture == null) return;
+            var hash = Convert.ToHexString(SHA256.HashData(picture));
+            if (hash == _lastClipboardImage) return;
+            _lastClipboardImage = hash;
+            byte pid = ++_clipId;
+            int chunks = 0;
+            foreach (var chunk in Frame.ClipboardImage(pid, picture, udp ? 1200 : 400)) { if (udp) SendUdp(chunk); else Enqueue(chunk); chunks++; }
+            Log.Info($"clipboard picture sent ({picture.Length / 1024} kB in {chunks} chunks over {(udp ? "the network" : "Bluetooth")})");
         }
         catch (Exception ex) { Log.Warn("clipboard read: " + ex.Message); }
+    }
+
+    private const int BleImageLimit = 300_000;
+    private string? _lastClipboardImage;
+    private (byte id, byte[]?[] chunks)? _imageIn;
+
+    private void ReceiveClipboardImage(Frame f)
+    {
+        if (f.Payload.Length < 5) return;
+        byte id = f.Payload[0];
+        int index = f.U16(1), total = f.U16(3);
+        if (total == 0 || index >= total || total > 8000) return;
+        lock (_clipIn)
+        {
+            if (_imageIn is not { } cur || cur.id != id || cur.chunks.Length != total)
+                _imageIn = cur = (id, new byte[]?[total]);
+            cur.chunks[index] = f.Payload[5..];
+            if (cur.chunks.Any(c => c == null)) return;
+            _imageIn = null;
+            var bytes = cur.chunks.SelectMany(c => c!).ToArray();
+            try
+            {
+                _clipboard.SetImage(bytes);
+                _lastClipboardImage = Convert.ToHexString(SHA256.HashData(bytes)); // don't bounce it straight back
+                Log.Info($"clipboard picture received ({bytes.Length / 1024} kB)");
+            }
+            catch (Exception ex) { Log.Warn("clipboard picture write: " + ex.Message); }
+        }
     }
 
     private void ReceiveClipboard(Frame f)

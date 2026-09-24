@@ -402,6 +402,47 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     }
 
     public void SetText(string text) => _window.Invoke(() => Clipboard.SetText(text));
+
+    // The picture last put on the clipboard by the other PC, with the clipboard's sequence number at that
+    // moment: while nothing has replaced it, GetImage hands back these very bytes, so the hash the session
+    // compares matches and the picture is not sent straight back on the return crossing (a re-encoded PNG of
+    // the same bitmap would not be byte-identical).
+    private uint _setImageSeq;
+    private byte[]? _setImageBytes;
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
+
+    public byte[]? GetImage(int maxBytes)
+    {
+        byte[]? result = null;
+        _window.Invoke(() =>
+        {
+            if (!Clipboard.ContainsImage() || Clipboard.ContainsText()) return;
+            if (_setImageBytes != null && GetClipboardSequenceNumber() == _setImageSeq) { result = _setImageBytes; return; }
+            using var img = Clipboard.GetImage();
+            if (img == null) return;
+            using var ms = new MemoryStream();
+            img.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+            if (ms.Length <= maxBytes) { result = ms.ToArray(); return; }
+            long pngSize = ms.Length;
+            ms.SetLength(0);
+            var jpeg = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders().First(c => c.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid);
+            using var p = new System.Drawing.Imaging.EncoderParameters(1);
+            p.Param[0] = new System.Drawing.Imaging.EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 85L);
+            img.Save(ms, jpeg, p);
+            if (ms.Length <= maxBytes) result = ms.ToArray();
+            else Log.Warn($"clipboard picture not sent: {pngSize / 1024} kB as PNG, {ms.Length / 1024} kB as JPEG, more than the {maxBytes / 1024} kB that Bluetooth carries in reasonable time");
+        });
+        return result;
+    }
+
+    public void SetImage(byte[] encoded) => _window.Invoke(() =>
+    {
+        using var ms = new MemoryStream(encoded);
+        using var img = Image.FromStream(ms);
+        Clipboard.SetImage(img);
+        _setImageSeq = GetClipboardSequenceNumber();
+        _setImageBytes = encoded;
+    });
 }
 
 internal static class TrayIcons
