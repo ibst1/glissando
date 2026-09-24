@@ -30,11 +30,24 @@ public sealed class BleCentralChannel : IChannel
         if (adapter == null) { StatusChanged?.Invoke("BLE error: no adapter"); Log.Error("no Bluetooth adapter"); return; }
         Log.Info($"BLE adapter {adapter.BluetoothAddress:X12} central={adapter.IsCentralRoleSupported}");
 
+        int emptyScans = 0;
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await ConnectOnceAsync(ct);
+                bool found = await ConnectOnceAsync(ct);
+                if (!found)
+                {
+                    emptyScans++;
+                    if (GiveUpAfterEmptyScans > 0 && emptyScans >= GiveUpAfterEmptyScans)
+                    {
+                        Log.Warn($"BLE central: no advertisement from the peer in {emptyScans} scans ({emptyScans * ScanSeconds} s); giving the central role up so this PC advertises again and the peer can connect instead");
+                        return;
+                    }
+                    Log.Info($"BLE central: no advertisement from the peer in {ScanSeconds} s; scanning again");
+                    continue;
+                }
+                emptyScans = 0;
             }
             catch (OperationCanceledException) { break; }
             catch (TimeoutException ex)
@@ -69,6 +82,14 @@ public sealed class BleCentralChannel : IChannel
 
     private bool _preConnected, _gotRx, _hung;
     private string? _staleDeviceId;
+    private const int ScanSeconds = 20;
+
+    /// <summary>After this many consecutive scans without the peer's advertisement, RunAsync returns instead of
+    /// scanning forever. BleAutoChannel sets it: the peer's advertising may have died (its adapter reported
+    /// "started" while nothing was on the air, 2026-09-24) while it can still connect, and this PC stopped
+    /// advertising the moment it took the central role -- so both waited for an advertisement that never came.
+    /// Going back to the auto loop puts this PC's advertisement on the air again. 0 = scan forever (pinned mode).</summary>
+    public int GiveUpAfterEmptyScans { get; set; }
 
     /// <summary>A GATT step failed. If the LE connection was already there when we looked the device up, it is
     /// most likely a leftover whose GATT server is gone; the retry loop waits for Windows to drop it.</summary>
@@ -125,16 +146,17 @@ public sealed class BleCentralChannel : IChannel
         }
     }
 
-    private async Task ConnectOnceAsync(CancellationToken ct)
+    /// <returns>False when the scan saw no advertisement from the peer; true after any attempt to connect.</returns>
+    private async Task<bool> ConnectOnceAsync(CancellationToken ct)
     {
         StatusChanged?.Invoke("scanning");
         ulong address = await ScanAsync(ct);
-        if (address == 0) return;
+        if (address == 0) return false;
 
         StatusChanged?.Invoke("connecting");
         _dropped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _device = await Step(BluetoothLEDevice.FromBluetoothAddressAsync(address), "device lookup", ct);
-        if (_device == null) { Log.Warn("FromBluetoothAddressAsync returned null"); return; }
+        if (_device == null) { Log.Warn("FromBluetoothAddressAsync returned null"); return true; }
         bool preConnected = _device.ConnectionStatus == BluetoothConnectionStatus.Connected;
         _preConnected = preConnected; _gotRx = false; _staleDeviceId = _device.DeviceId;
         _firstRx = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -153,17 +175,17 @@ public sealed class BleCentralChannel : IChannel
         if (services.Status != GattCommunicationStatus.Success || services.Services.Count == 0)
         {
             FailedOnPossiblyStaleLink($"service lookup {services.Status}" + (services.Services.Count == 0 && services.Status == GattCommunicationStatus.Success ? " (service not found)" : ""), preConnected);
-            return;
+            return true;
         }
         _service = services.Services[0];
         var chars = await Step(_service.GetCharacteristicsAsync(BluetoothCacheMode.Uncached), "characteristics lookup", ct);
-        if (chars.Status != GattCommunicationStatus.Success) { FailedOnPossiblyStaleLink($"characteristics {chars.Status}", preConnected); return; }
+        if (chars.Status != GattCommunicationStatus.Success) { FailedOnPossiblyStaleLink($"characteristics {chars.Status}", preConnected); return true; }
         foreach (var c in chars.Characteristics)
         {
             if (c.Uuid == BleIds.Rx) _rx = c;
             else if (c.Uuid == BleIds.Tx) _tx = c;
         }
-        if (_rx == null || _tx == null) { FailedOnPossiblyStaleLink("rx/tx characteristics missing", preConnected); return; }
+        if (_rx == null || _tx == null) { FailedOnPossiblyStaleLink("rx/tx characteristics missing", preConnected); return true; }
 
         _tx.ValueChanged += OnValueChanged;
         // Windows keeps a bonded client's notify subscription (CCCD) across connections. When the peripheral's
@@ -177,7 +199,7 @@ public sealed class BleCentralChannel : IChannel
             await Task.Delay(150, ct);
         }
         var sub = await Step(_tx.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.Notify), "subscribe", ct);
-        if (sub != GattCommunicationStatus.Success) { FailedOnPossiblyStaleLink($"subscribe {sub}", preConnected); return; }
+        if (sub != GattCommunicationStatus.Success) { FailedOnPossiblyStaleLink($"subscribe {sub}", preConnected); return true; }
         _session.MaintainConnection = true;
 
         // Connection parameters are left at Windows' default. The 2026-09-08 transport tests measured default
@@ -201,11 +223,12 @@ public sealed class BleCentralChannel : IChannel
                 if (!_gotRx && !_dropped.Task.IsCompleted)
                 {
                     Log.Warn("BLE central: no answer within 5 s on the pre-existing connection - it is stale; releasing it so Windows drops it");
-                    return;
+                    return true;
                 }
             }
             await _dropped.Task;
         }
+        return true;
     }
 
     private TaskCompletionSource _firstRx = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -220,7 +243,7 @@ public sealed class BleCentralChannel : IChannel
         watcher.Start();
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(ScanSeconds));
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
             using (linked.Token.Register(() => found.TrySetResult(0)))
             {

@@ -63,7 +63,7 @@ public sealed class BleAutoChannel : IChannel
             {
                 await RunOnceAsync(run.Token);
                 if (ct.IsCancellationRequested) return;
-                if (!_asleep) Log.Warn("BLE auto: run loop ended; restarting in 5 s");
+                if (!_asleep) Log.Info("BLE auto: starting over in 5 s (advertising and scanning)");
             }
             catch (OperationCanceledException) { if (ct.IsCancellationRequested) return; }
             catch (Exception ex)
@@ -250,7 +250,9 @@ public sealed class BleAutoChannel : IChannel
             p.Dispose();
         }
 
-        var c = new BleCentralChannel();
+        // Three empty scans (60 s) and the central gives up, which ends this run: the loop above starts over
+        // with this PC advertising again, so a peer whose advertising has died can connect to us instead.
+        var c = new BleCentralChannel { GiveUpAfterEmptyScans = 3 };
         var detachC = Attach(c, up => { if (up) Remember("connect"); });
         _active = c;
         try { await c.RunAsync(ct); }
