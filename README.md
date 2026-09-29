@@ -57,11 +57,13 @@ mouse or press a key on it.
 
 The mouse and the keyboard need not belong to the same PC. With a mouse
 paired to one PC and the keyboard you type on attached to the other, turn on
-*This PC's keyboard types where the cursor is* on the keyboard's PC. Its keys
-then go to the other PC whenever that PC's cursor is at home, and type locally
-while that cursor is over on the keyboard's PC; a key no longer takes the
-machine back in that state (the keyboard's PC's own mouse still does).
-**Ctrl+Alt+L** keeps the keyboard local until pressed again.
+*This PC's keyboard follows the mouse used last* on the keyboard's PC. Once
+the other PC's mouse has visited and gone home, keys typed there go to the
+other PC; they type locally while that cursor is over on the keyboard's PC,
+and from the moment the keyboard's PC's own mouse moves, until the other
+mouse visits again. A key no longer takes the machine back while the other
+cursor is here (the PC's own mouse still does). **Ctrl+Alt+L** keeps the
+keyboard local until pressed again.
 
 The placement only needs to be set on one PC; the other adopts it (mirrored)
 when they connect. Whichever PC's placement was edited most recently wins.

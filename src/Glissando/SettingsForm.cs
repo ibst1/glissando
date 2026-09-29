@@ -429,7 +429,7 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(Option(_clip, "Copy clipboard text across when the cursor crosses"));
         layout.Controls.Add(Option(_hideCursor, "Hide this PC's cursor while controlling the other PC (swaps the system cursors; restored on return, and on next start if Glissando is ever killed while they are hidden)"));
         _keysFollow.Checked = working.KeyboardFollowsCursor;
-        layout.Controls.Add(Option(_keysFollow, "This PC's keyboard types where the cursor is. For a mouse that belongs to the other PC: keys typed here go there whenever its cursor is at home, and type here while its cursor is on this PC (a key then no longer takes this PC back; moving this PC's own mouse still does). Ctrl+Alt+L keeps the keyboard here."));
+        layout.Controls.Add(Option(_keysFollow, "This PC's keyboard follows the mouse used last. After the other PC's mouse has been here and gone home, keys typed here go to the other PC; the moment this PC's own mouse moves, they type here again (and a key no longer takes this PC back while the other cursor is here; moving this PC's mouse still does). Ctrl+Alt+L keeps the keyboard here."));
 
         layout.Controls.Add(Header("Window mirroring"));
         _hideMirror.Checked = working.HideMirroredWindow;

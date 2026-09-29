@@ -178,8 +178,10 @@ public sealed class Session : IDisposable
         // handover (the peer has actually stopped) stays responsive.
         _capture.CanEnter = () => Authenticated && _s.CaptureEnabled && !Locked && !LocalLocked && !PeerLocked
             && !_injector.Active && !PeerRecentlyInjected();
-        // Every state change (link, authentication, control, lock, settings) re-evaluates where the keyboard goes.
+        // Every state change (link, authentication, control, lock, settings) re-evaluates where the keyboard goes,
+        // as does the first movement of this PC's own mouse while the keys are away (raised only then, not per move).
         StateChanged += UpdateKeyForwarding;
+        _capture.LocalMouseWhileForwarding += () => { UpdateKeyForwarding(); StateChanged?.Invoke(); };
 
         if (s.UdpMirror)
         {
@@ -225,8 +227,18 @@ public sealed class Session : IDisposable
     private void UpdateKeyForwarding()
     {
         _capture.KeyboardFollowsCursor = _s.KeyboardFollowsCursor;
-        _capture.ForwardKeys = _s.KeyboardFollowsCursor && Authenticated && !Locked && !LocalLocked && !PeerLocked && !_injector.Active;
+        _capture.ForwardKeys = _s.KeyboardFollowsCursor && Authenticated && !Locked && !LocalLocked && !PeerLocked && !_injector.Active
+            && PeerMouseUsedLast();
     }
+
+    // When the other PC's mouse was last heard from: its cursor arriving, moving here, or leaving.
+    private long _lastPeerMouseTicks;
+
+    /// <summary>The keyboard follows the mouse used last. A mouse on this PC (2026-09-29: the user plugged one
+    /// in and could no longer type on this PC) keeps the keys here from its first movement; the other PC's
+    /// mouse, whose life at home this PC cannot see, takes them back with its next visit here. Neither used
+    /// yet: the other PC's, which is what the setting is for.</summary>
+    private bool PeerMouseUsedLast() => _lastPeerMouseTicks >= _capture.LastLocalMouseTicks;
 
     private bool PeerRecentlyInjected()
     {
@@ -531,6 +543,8 @@ public sealed class Session : IDisposable
     /// <summary>Acts on a received frame.</summary>
     private void HandleApp(Frame f)
     {
+        if (f.Type is FrameType.Enter or FrameType.Leave or FrameType.ReturnEdge or FrameType.MouseMove or FrameType.MouseButton or FrameType.MouseWheel)
+            _lastPeerMouseTicks = Stopwatch.GetTimestamp();
         switch (f.Type)
         {
             case FrameType.Hello:

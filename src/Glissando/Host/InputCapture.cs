@@ -38,6 +38,14 @@ public sealed class InputCapture : IDisposable
     /// is the point. Its mouse still takes the machine back.</summary>
     public volatile bool KeyboardFollowsCursor;
 
+    /// <summary>Stopwatch time of the last physical (not injected) mouse event on this PC. The keyboard follows
+    /// whichever mouse was used last: this PC's own, and the keys stay here; the other PC's (seen as its cursor
+    /// coming and going), and they go there.</summary>
+    public long LastLocalMouseTicks;
+
+    /// <summary>This PC's own mouse moved while its keys were going to the other PC: time to bring them home.</summary>
+    public event Action? LocalMouseWhileForwarding;
+
     private volatile bool _forwardKeys;
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _typedKeysDown = [];
 
@@ -166,6 +174,8 @@ public sealed class InputCapture : IDisposable
             // hand control back so they can use, and re-share, this machine.
             if ((info.flags & Native.LLMHF_INJECTED) == 0)
             {
+                LastLocalMouseTicks = Stopwatch.GetTimestamp();
+                if (_forwardKeys) LocalMouseWhileForwarding?.Invoke();
                 if (BeingControlled && TakeBackArmed) LocalInputWhileControlled?.Invoke();
                 if (msg is Native.WM_LBUTTONDOWN or Native.WM_RBUTTONDOWN or Native.WM_MBUTTONDOWN or Native.WM_XBUTTONDOWN)
                     LocalActivity?.Invoke(new Point(info.pt.X, info.pt.Y));
@@ -218,14 +228,12 @@ public sealed class InputCapture : IDisposable
             // Local mode: only the lock/jump hotkeys are ours. LEFT Ctrl specifically, so a key-remapper that
             // turns CapsLock into RIGHT Ctrl (Sostenuto does) cannot trip these -- otherwise its CapsLock+Alt+J
             // reads as Ctrl+Alt+J and jumps. Modifier state is real here (nothing is swallowed).
-            if (!up && info.vkCode == Native.VK_L && Native.IsDown(Native.VK_LCONTROL) && Native.IsDown(Native.VK_MENU))
+            // While the keys are going to the other PC, a held Ctrl or Alt was swallowed and sent there, so
+            // Windows here does not know it is down; ask the typed-keys set too, or Ctrl+Alt+L -- the very way
+            // to bring the keyboard home -- can never fire (2026-09-29).
+            if (!up && info.vkCode is Native.VK_L or Native.VK_J && LocalHotkeyModifiers())
             {
-                LockToggleRequested?.Invoke();
-                return 1;
-            }
-            if (!up && info.vkCode == Native.VK_J && Native.IsDown(Native.VK_LCONTROL) && Native.IsDown(Native.VK_MENU))
-            {
-                JumpRequested?.Invoke();
+                if (info.vkCode == Native.VK_L) LockToggleRequested?.Invoke(); else JumpRequested?.Invoke();
                 return 1;
             }
             if (!up && (info.flags & Native.LLKHF_INJECTED) == 0)
@@ -306,6 +314,19 @@ public sealed class InputCapture : IDisposable
     // LEFT Ctrl only, so a CapsLock-to-right-Ctrl remapper's chords do not fire our escape/lock/jump hotkeys.
     private bool LCtrlDown() => _keysDown.Any(k => k.vk == Native.VK_LCONTROL);
     private bool AltDown() => _keysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU);
+
+    /// <summary>Left Ctrl and Alt held, as Windows sees it here or as the keys forwarded to the other PC say.</summary>
+    private bool LocalHotkeyModifiers()
+    {
+        bool ctrl = Native.IsDown(Native.VK_LCONTROL), alt = Native.IsDown(Native.VK_MENU);
+        if (!ctrl || !alt)
+            lock (_modeGate)
+            {
+                ctrl = ctrl || _typedKeysDown.Any(k => k.vk == Native.VK_LCONTROL);
+                alt = alt || _typedKeysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU or Native.VK_MENU);
+            }
+        return ctrl && alt;
+    }
 
     // ---- raw input --------------------------------------------------------------
 

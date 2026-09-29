@@ -7,3 +7,8 @@ dist/
 *.log
 *.txt
 !README*.txt
+# build.ps1 publishes into this folder now that the repo lives in Program\Glissando
+/Glissando.exe
+/Glissando.prev.exe
+/*.pdb
+/*.dll
