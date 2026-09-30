@@ -30,6 +30,15 @@ public sealed class BlePeripheralChannel : IChannel
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly GattServiceProviderAdvertisingParameters _advParams = new() { IsConnectable = true, IsDiscoverable = true };
 
+    // Cancelled to make RunAsync return, so that BleAutoChannel starts a fresh instance with a NEW GATT server.
+    // Restarting the advertisement alone is not enough after sleep: the old server keeps a subscribed client
+    // that is no longer there, every notification to it fails ("Value does not fall within the expected
+    // range"), so the peer that connects hears nothing, never authenticates, and the two go round every 15 s
+    // for hours (2026-09-30). Only a new GattServiceProvider sheds the ghost client.
+    private CancellationTokenSource? _restart;
+    private int _notifyFailures;
+    private const int NotifyFailuresBeforeRestart = 6;
+
     public async Task RunAsync(CancellationToken ct)
     {
         var adapter = await BluetoothAdapter.GetDefaultAsync();
@@ -76,9 +85,11 @@ public sealed class BlePeripheralChannel : IChannel
         // connect. So give up after a few tries and go quiet: BleAutoChannel already treats "not advertising"
         // as "this PC connects", and scanning continues regardless. A run that does start resets the budget.
         _advFails = 0;
-        while (!ct.IsCancellationRequested)
+        _restart = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var loop = _restart.Token;
+        while (!loop.IsCancellationRequested)
         {
-            try { await Task.Delay(2000, ct); } catch (OperationCanceledException) { break; }
+            try { await Task.Delay(2000, loop); } catch (OperationCanceledException) { break; }
             var st = _provider.AdvertisementStatus;
             if (st is GattServiceProviderAdvertisementStatus.Aborted or GattServiceProviderAdvertisementStatus.Stopped)
             {
@@ -95,6 +106,14 @@ public sealed class BlePeripheralChannel : IChannel
             else if (st == GattServiceProviderAdvertisementStatus.Started) _advFails = 0;
         }
         try { _provider.StopAdvertising(); } catch { }
+        if (!ct.IsCancellationRequested)
+        {
+            // A restart, not the end: drop this server so nothing keeps it alive, and report the link gone.
+            Log.Info("BLE peripheral: releasing the GATT server; a fresh one follows");
+            _rx = null; _tx = null; _provider = null;
+            if (IsLinked) { IsLinked = false; LinkChanged?.Invoke(false); }
+            StatusChanged?.Invoke("restarting");
+        }
     }
 
     private void Fail(string why)
@@ -144,26 +163,30 @@ public sealed class BlePeripheralChannel : IChannel
             var results = await tx.NotifyValueAsync(w.DetachBuffer());
             foreach (var r in results)
                 if (r.Status != GattCommunicationStatus.Success) return false;
+            _notifyFailures = 0;
             return results.Count > 0;
         }
         catch (Exception ex)
         {
             Log.Warn("BLE notify failed: " + ex.Message);
+            if (++_notifyFailures == NotifyFailuresBeforeRestart)
+            {
+                Log.Warn($"BLE peripheral: {NotifyFailuresBeforeRestart} notifications in a row failed; the subscribed client is a ghost, recreating the GATT server");
+                Reconnect();
+            }
             return false;
         }
         finally { _sendLock.Release(); }
     }
 
+    /// <summary>Start over with a new GATT server (RunAsync returns; BleAutoChannel runs a fresh instance).
+    /// The central owns the connection, and restarting only the advertisement leaves a ghost client behind.</summary>
     public void Reconnect()
     {
-        // The central owns the connection; all we can do is make sure we are really advertising.
-        // After sleep Windows may still report Started while nothing is on the air, so restart it.
-        var p = _provider;
-        if (p == null) return;
-        _advFails = 0; // a manual reconnect or a wake gets a fresh set of restart attempts
-        try { p.StopAdvertising(); } catch { }
-        try { p.StartAdvertising(_advParams); Log.Info("BLE advertising restarted"); }
-        catch (Exception ex) { Log.Error("StartAdvertising: " + ex.Message); }
+        var r = _restart;
+        if (r == null || r.IsCancellationRequested) return;
+        Log.Info("BLE peripheral: reconnect requested; recreating the GATT server");
+        try { r.Cancel(); } catch { }
     }
 
     public void Dispose()

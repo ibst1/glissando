@@ -170,7 +170,7 @@ public sealed class BleAutoChannel : IChannel
                             StatusChanged?.Invoke("BLE error: " + Brief(ex?.Message ?? "?") + " (retrying)");
                         }
                     }
-                    else if (!pToken.IsCancellationRequested) Log.Warn("BLE peripheral: stopped; retrying in 5 s");
+                    else if (!pToken.IsCancellationRequested) Log.Info("BLE peripheral: run ended (reconnect or failure); a fresh GATT server starts in 5 s");
                     try { await Task.Delay(5000, pToken); } catch (OperationCanceledException) { return; }
                     if (pToken.IsCancellationRequested) return;
                     StartPeripheral();
