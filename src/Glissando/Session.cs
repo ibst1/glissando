@@ -112,6 +112,8 @@ public sealed class Session : IDisposable
     private readonly byte[] _myNonce = new byte[16];
     private byte[]? _peerNonce; // the peer's last Hello nonce: a new one means a new Hello from it
     private long _lastPeer, _lastSend, _lastHello;
+    private long _lastPong, _lastLivePing, _lastOneWayReconnect;   // is the peer HEARING us? see TimerLoop
+    private int _pingsSincePong;
     private long _linkedSince;   // when the current link came up, for the stuck-handshake watchdog
     private long _lastActivePing, _lastRttLog, _lastPeriodicHello;
     private string _lastHelloSummary = "";
@@ -503,6 +505,7 @@ public sealed class Session : IDisposable
         }
         if (!changed) return;
         Log.Info(v ? $"peer authenticated: {PeerName}" : "peer lost");
+        if (v) { _lastPong = Stopwatch.GetTimestamp(); _pingsSincePong = 0; } // the "does it hear us" clock starts now
         if (v) SendStatus(); // the reliable stream is reset on link change, not on re-auth over the same link
         else { PeerLocked = false; PeerPowerSaving = false; }
         StateChanged?.Invoke();
@@ -590,6 +593,8 @@ public sealed class Session : IDisposable
                 break;
 
             case FrameType.Pong:
+                _lastPong = Stopwatch.GetTimestamp();
+                _pingsSincePong = 0;
                 if (f.Payload.Length >= 8)
                 {
                     double rtt = (Stopwatch.GetTimestamp() - f.I64(0)) * 1000.0 / Stopwatch.Frequency;
@@ -891,6 +896,34 @@ public sealed class Session : IDisposable
                 {
                     Log.Warn($"controlling, but no frames from {PeerName} for {sincePeer:F0} ms; releasing");
                     _capture.Release();
+                }
+
+                // A liveness ping every 2 s, whatever else is being sent: its Pong is the only proof that the peer
+                // HEARS this PC. Frames arriving from it prove nothing about that. On 2026-10-02 one direction of
+                // the link died while the other lived: the peer kept sending (it believed it was controlling this
+                // PC and never heard our Detached), this PC's cursor crossed over, was hidden here and moved
+                // nothing there, and nothing brought it back, because the peer's frames kept every "peer is
+                // gone" check quiet. So: several pings unanswered -> let go of the pointer, and reconnect.
+                if (Authenticated && now - _lastLivePing > Stopwatch.Frequency * 2)
+                {
+                    _lastLivePing = now;
+                    _pingsSincePong++;
+                    Enqueue(Frame.Ping(now));
+                }
+                double sincePong = (now - _lastPong) * 1000.0 / Stopwatch.Frequency;
+                if (Authenticated && _pingsSincePong >= 2 && sincePong > (_capture.Remote ? 4000 : 8000))
+                {
+                    if (_capture.Remote)
+                    {
+                        Log.Warn($"controlling, but {PeerName} has not answered a ping for {sincePong:F0} ms (it does not hear this PC); releasing");
+                        _capture.Release();
+                    }
+                    if (now - _lastOneWayReconnect > Stopwatch.Frequency * 20)
+                    {
+                        _lastOneWayReconnect = now;
+                        Log.Warn($"{PeerName} sends but has not answered a ping for {sincePong:F0} ms: the link carries one direction only; reconnecting");
+                        _channel.Reconnect();
+                    }
                 }
 
                 // While controlling, tell the other PC so it stays active even when the mouse is still.

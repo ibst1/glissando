@@ -36,7 +36,7 @@ public sealed class BlePeripheralChannel : IChannel
     // range"), so the peer that connects hears nothing, never authenticates, and the two go round every 15 s
     // for hours (2026-09-30). Only a new GattServiceProvider sheds the ghost client.
     private CancellationTokenSource? _restart;
-    private int _notifyFailures;
+    private int _notifyFailures, _undelivered;
     private const int NotifyFailuresBeforeRestart = 6;
 
     public async Task RunAsync(CancellationToken ct)
@@ -161,10 +161,15 @@ public sealed class BlePeripheralChannel : IChannel
             var w = new DataWriter();
             w.WriteBytes(packet);
             var results = await tx.NotifyValueAsync(w.DetachBuffer());
+            bool ok = results.Count > 0;
             foreach (var r in results)
-                if (r.Status != GattCommunicationStatus.Success) return false;
-            _notifyFailures = 0;
-            return results.Count > 0;
+                if (r.Status != GattCommunicationStatus.Success) ok = false;
+            if (ok) { _notifyFailures = 0; _undelivered = 0; return true; }
+            // Not an exception, so it used to pass in silence: a link whose notify direction had died looked
+            // healthy from here for minutes (2026-10-02). Say so, sparingly; the session decides what to do.
+            if (++_undelivered % 50 == 1)
+                Log.Warn($"BLE notify not delivered ({(results.Count == 0 ? "no subscribed client" : results[0].Status.ToString())}); {_undelivered} in a row");
+            return false;
         }
         catch (Exception ex)
         {
