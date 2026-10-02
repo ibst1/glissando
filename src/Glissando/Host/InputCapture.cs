@@ -55,6 +55,12 @@ public sealed class InputCapture : IDisposable
     // held while crossing over with the trackpad.
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _localKeysDown = [];
 
+    // Mouse buttons whose DOWN was let through to this PC, by the same rule: a button held while the cursor
+    // crossed over (a drag pushed against the edge) had its release swallowed and forwarded, so Windows here
+    // kept it down -- the cursor still moved and the wheel worked, but no click registered until
+    // Ctrl+Alt+Del (2026-10-02).
+    private readonly HashSet<byte> _localButtonsDown = [];
+
     /// <summary>"Keyboard follows the cursor", the active half: while true and not remote, every key typed on this
     /// PC is swallowed and sent as a TypedKey, which the other PC applies without a control session. The session
     /// keeps this in step with the link and with who controls whom (off while the other PC's cursor is on this
@@ -180,8 +186,19 @@ public sealed class InputCapture : IDisposable
                 if (msg is Native.WM_LBUTTONDOWN or Native.WM_RBUTTONDOWN or Native.WM_MBUTTONDOWN or Native.WM_XBUTTONDOWN)
                     LocalActivity?.Invoke(new Point(info.pt.X, info.pt.Y));
             }
+            if (ButtonOf(msg, info.mouseData) is (byte b, bool down))
+                lock (_modeGate) { if (down) _localButtonsDown.Add(b); else _localButtonsDown.Remove(b); }
             return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
         }
+
+        // The release of a button pressed here before crossing belongs here too (see _localButtonsDown).
+        if (ButtonOf(msg, info.mouseData) is (byte lb, false))
+            lock (_modeGate)
+                if (_localButtonsDown.Remove(lb))
+                {
+                    Log.Info($"button {lb} was pressed before crossing: its release stays on this PC");
+                    return Native.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+                }
 
         // Our own injections while remote -- the mirror driving a window on THIS PC while it controls the
         // other one -- are for this PC: pass them through, neither swallowed nor forwarded. Without this the
@@ -209,6 +226,17 @@ public sealed class InputCapture : IDisposable
         }
         return 1;
     }
+
+    /// <summary>Button number (1 left, 2 right, 3 middle, 4/5 X) and press/release of a mouse message, or null.</summary>
+    private static (byte button, bool down)? ButtonOf(int msg, uint mouseData) => msg switch
+    {
+        Native.WM_LBUTTONDOWN => (1, true), Native.WM_LBUTTONUP => (1, false),
+        Native.WM_RBUTTONDOWN => (2, true), Native.WM_RBUTTONUP => (2, false),
+        Native.WM_MBUTTONDOWN => (3, true), Native.WM_MBUTTONUP => (3, false),
+        Native.WM_XBUTTONDOWN => ((byte)(3 + (mouseData >> 16)), true),
+        Native.WM_XBUTTONUP => ((byte)(3 + (mouseData >> 16)), false),
+        _ => null,
+    };
 
     private void Button(byte button, bool down)
     {
