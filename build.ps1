@@ -35,18 +35,47 @@ Write-Host "Building Glissando $info ($buildTime)"
 $selfContained = if ($FrameworkDependent) { "false" } else { "true" }
 # No IncludeNativeLibrariesForSelfExtract: we ship no native libraries of our own, and with it the
 # first start of every new build spent ~30 s extracting the runtime to a cache.
-# A running Glissando locks its exe, and publish then fails. A running exe may still be RENAMED, so move it
-# aside first; the instance keeps running from the renamed file and the next start picks up the new one.
+#
+# Publish into a staging folder first, never straight into the folder the program runs from. Twice a publish
+# that failed half-way -- killed under load, then refused because another process had the fresh exe open --
+# left a truncated Glissando.exe there, and the next start had nothing to run (2026-10-02, 2026-10-04).
+$stage = Join-Path $root "src\Glissando\bin\publish"
+if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+& $dotnet publish $proj -c $Configuration -r $Runtime --self-contained $selfContained `
+    -p:PublishSingleFile=true -p:Version=$version -p:InformationalVersion=$info -p:BuildTime="$buildTime" -o $stage
+if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+$staged = Join-Path $stage "Glissando.exe"
+if (-not (Test-Path $staged)) { throw "publish produced no Glissando.exe" }
+$stagedSize = (Get-Item $staged).Length
+
+function Copy-WithRetry([string]$from, [string]$to) {
+    # A scanner or a sync tool may hold the destination for a moment; try for a few seconds, and check the size.
+    for ($i = 1; $i -le 12; $i++) {
+        try {
+            Copy-Item $from $to -Force -ErrorAction Stop
+            if ((Get-Item $to).Length -eq (Get-Item $from).Length) { return }
+        } catch { if ($i -eq 12) { throw } }
+        Start-Sleep -Milliseconds 700
+    }
+    throw "could not copy $from to $to intact"
+}
+
+# A running Glissando locks its exe, but a running exe may still be RENAMED: move it aside, so the instance
+# keeps running from the renamed file and the next start picks up the new one. A stump left by an earlier
+# failed publish is not worth keeping as the previous version; just delete it.
+New-Item -ItemType Directory -Force $target | Out-Null
 $exe = Join-Path $target "Glissando.exe"
 if (Test-Path $exe) {
     $prev = Join-Path $target "Glissando.prev.exe"
-    Remove-Item $prev -Force -ErrorAction SilentlyContinue
-    try { Move-Item $exe $prev -Force } catch { Write-Host "note: could not move the old exe aside ($_)" }
+    if ((Get-Item $exe).Length -lt $stagedSize / 2) {
+        Remove-Item $exe -Force -ErrorAction SilentlyContinue
+    } else {
+        Remove-Item $prev -Force -ErrorAction SilentlyContinue
+        try { Move-Item $exe $prev -Force } catch { Write-Host "note: could not move the old exe aside ($_)" }
+    }
 }
-& $dotnet publish $proj -c $Configuration -r $Runtime --self-contained $selfContained `
-    -p:PublishSingleFile=true -p:Version=$version -p:InformationalVersion=$info -p:BuildTime="$buildTime" -o $target
-if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+Get-ChildItem $stage -File | ForEach-Object { Copy-WithRetry $_.FullName (Join-Path $target $_.Name) }
 
 New-Item -ItemType Directory -Force $dist | Out-Null
-Copy-Item (Join-Path $target "Glissando.exe") (Join-Path $dist "Glissando.exe") -Force
+Copy-WithRetry $staged (Join-Path $dist "Glissando.exe")
 Write-Host "Published to $target and $dist"
