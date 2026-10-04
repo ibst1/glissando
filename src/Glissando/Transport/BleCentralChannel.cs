@@ -30,12 +30,15 @@ public sealed class BleCentralChannel : IChannel
         if (adapter == null) { StatusChanged?.Invoke("BLE error: no adapter"); Log.Error("no Bluetooth adapter"); return; }
         Log.Info($"BLE adapter {adapter.BluetoothAddress:X12} central={adapter.IsCentralRoleSupported}");
 
-        int emptyScans = 0;
+        int emptyScans = 0, failedConnects = 0;
         while (!ct.IsCancellationRequested)
         {
+            bool attempted = false;
+            _linkedThisAttempt = false;
             try
             {
                 bool found = await ConnectOnceAsync(ct);
+                attempted = found;
                 if (!found)
                 {
                     emptyScans++;
@@ -56,14 +59,30 @@ public sealed class BleCentralChannel : IChannel
                 // (52 s of silence until Windows dropped the link, 2026-09-15). Treat the link as stale below.
                 Log.Warn("BLE central: " + ex.Message + " - releasing the link so Windows drops it");
                 _hung = true;
+                attempted = true;
             }
             catch (Exception ex)
             {
                 Log.Warn("BLE central: " + ex.Message);
+                attempted = true;
             }
             finally
             {
                 TearDown();
+            }
+            // The peer is in plain view and yet no attempt gets as far as a link: after sleep this PC's radio can
+            // hold a connection to the peer whose far end is gone, and every GATT step on it fails or hangs
+            // (2026-10-04: "connecting" for as long as anyone watched, the peer "advertising"). Stop being the
+            // one who connects; BleAutoChannel then lets the peer connect to us instead.
+            if (attempted)
+            {
+                if (_linkedThisAttempt) failedConnects = 0;
+                else if (GiveUpAfterFailedConnects > 0 && ++failedConnects >= GiveUpAfterFailedConnects)
+                {
+                    Log.Warn($"BLE central: {failedConnects} attempts in a row reached the peer but no link; giving the central role up so the peer can connect to this PC instead");
+                    GaveUpOnFailedConnects = true;
+                    return;
+                }
             }
             // A connection that pre-dated us and never carried a byte from the peer is a leftover from its
             // previous process or from before sleep: its GATT server is gone, and Windows keeps the LE link up
@@ -90,6 +109,15 @@ public sealed class BleCentralChannel : IChannel
     /// advertising the moment it took the central role -- so both waited for an advertisement that never came.
     /// Going back to the auto loop puts this PC's advertisement on the air again. 0 = scan forever (pinned mode).</summary>
     public int GiveUpAfterEmptyScans { get; set; }
+
+    /// <summary>After this many consecutive attempts that found the peer's advertisement but did not end in a
+    /// link, RunAsync returns with <see cref="GaveUpOnFailedConnects"/> set. 0 = keep trying (pinned mode).</summary>
+    public int GiveUpAfterFailedConnects { get; set; }
+
+    /// <summary>RunAsync ended because connecting kept failing with the peer in view.</summary>
+    public bool GaveUpOnFailedConnects { get; private set; }
+
+    private bool _linkedThisAttempt;
 
     /// <summary>A GATT step failed. If the LE connection was already there when we looked the device up, it is
     /// most likely a leftover whose GATT server is gone; the retry loop waits for Windows to drop it.</summary>
@@ -208,6 +236,7 @@ public sealed class BleCentralChannel : IChannel
         // controlling PC sharing this one radio, not the interval, so there is nothing to tune here.
         Log.Info($"BLE linked to {_device.Name} ({address:X12}), maxPdu {_session.MaxPduSize}");
         IsLinked = true;
+        _linkedThisAttempt = true;
         StatusChanged?.Invoke("linked");
         LinkChanged?.Invoke(true);
 

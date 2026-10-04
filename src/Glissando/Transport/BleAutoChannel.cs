@@ -188,6 +188,17 @@ public sealed class BleAutoChannel : IChannel
         long lastWaitLog = 0;
         int patienceMs = 8000 + (int)(myAddr % 11) * 1000; // 8-18 s, different on the two PCs
         string role = _lastRole() ?? "";
+        // Our own attempts to connect have just failed several times with the peer in view: for this round,
+        // be the one who waits, and wait long enough for the peer's own patience to run out so it connects
+        // to us. The remembered roles then follow whichever way the link comes up.
+        bool yielding = _yieldNextRound;
+        _yieldNextRound = false;
+        if (yielding)
+        {
+            role = "wait";
+            patienceMs *= 3;
+            Log.Info($"BLE auto: connecting kept failing; advertising and giving the other PC {patienceMs / 1000} s to connect to this one instead");
+        }
         watcher.Received += (s, e) =>
         {
             if (e.BluetoothAddress == myAddr || e.BluetoothAddress == 0) return;
@@ -252,12 +263,15 @@ public sealed class BleAutoChannel : IChannel
 
         // Three empty scans (60 s) and the central gives up, which ends this run: the loop above starts over
         // with this PC advertising again, so a peer whose advertising has died can connect to us instead.
-        var c = new BleCentralChannel { GiveUpAfterEmptyScans = 3 };
+        // Likewise three attempts in a row that reach the peer but end without a link: next round this PC waits.
+        var c = new BleCentralChannel { GiveUpAfterEmptyScans = 3, GiveUpAfterFailedConnects = 3 };
         var detachC = Attach(c, up => { if (up) Remember("connect"); });
         _active = c;
         try { await c.RunAsync(ct); }
-        finally { detachC(); try { c.Dispose(); } catch { } _active = null; }
+        finally { if (c.GaveUpOnFailedConnects) _yieldNextRound = true; detachC(); try { c.Dispose(); } catch { } _active = null; }
     }
+
+    private bool _yieldNextRound;
 
     private void Remember(string role)
     {
