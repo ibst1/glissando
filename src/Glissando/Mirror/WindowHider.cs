@@ -20,6 +20,10 @@ internal static class WindowHider
     private const int GWL_EXSTYLE = -20;
     private const long WS_EX_LAYERED = 0x80000;
     private const long WS_EX_TRANSPARENT = 0x20;
+    private const long WS_EX_TOOLWINDOW = 0x80;
+    private const uint GW_HWNDNEXT = 2;
+    private const int DWMWA_CLOAKED = 14;
+    private static readonly IntPtr HWND_BOTTOM = new(1);
     private const uint LWA_ALPHA = 0x2;
     private const byte HiddenAlpha = 1;
     private const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20;
@@ -96,6 +100,40 @@ internal static class WindowHider
         }
     }
 
+    /// <summary>
+    /// If the hidden window holds the focus, hand it to the window behind it and send the hidden one to the back.
+    /// A click on the mirror leaves the source window focused here; once the viewer's mouse crossed over to drive
+    /// this PC, its typing went into that invisible window until something else was clicked (2026-10-05).
+    /// </summary>
+    public static void StepAside()
+    {
+        lock (Gate)
+        {
+            if (_hwnd == IntPtr.Zero || GetForegroundWindow() != _hwnd) return;
+            IntPtr next = NextBehind(_hwnd);
+            SetWindowPos(_hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            if (next == IntPtr.Zero) next = GetShellWindow();
+            bool ok = next != IntPtr.Zero && MirrorTarget.ForceForeground(next);
+            Log.Info($"mirror: hidden window {_hwnd:X} gave up the focus to \"{WindowCapture.Title(next)}\"{(ok ? "" : " (refused)")}");
+        }
+    }
+
+    /// <summary>The first window below this one in the z-order that a person could see and work in.</summary>
+    private static IntPtr NextBehind(IntPtr hwnd)
+    {
+        for (IntPtr h = GetWindow(hwnd, GW_HWNDNEXT); h != IntPtr.Zero; h = GetWindow(h, GW_HWNDNEXT))
+        {
+            if (!IsWindowVisible(h) || IsIconic(h)) continue;
+            if ((GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64() & WS_EX_TOOLWINDOW) != 0) continue;
+            if (DwmGetWindowAttribute(h, DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0) continue;
+            if (WindowCapture.SizeOf(h) is not { } s || s.Width < 50 || s.Height < 50) continue;
+            if (GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64() is var ex && (ex & WS_EX_LAYERED) != 0
+                && GetLayeredWindowAttributes(h, out _, out byte a, out uint f) && (f & LWA_ALPHA) != 0 && a < 16) continue;
+            return h;
+        }
+        return IntPtr.Zero;
+    }
+
     /// <summary>Show the hidden window again (no-op if none is hidden).</summary>
     public static void Unhide()
     {
@@ -151,5 +189,11 @@ internal static class WindowHider
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint key, byte alpha, uint flags);
     [DllImport("user32.dll")] private static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint key, out byte alpha, out uint flags);
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hwnd, uint cmd);
+    [DllImport("user32.dll")] private static extern IntPtr GetShellWindow();
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
     [DllImport("user32.dll")] private static extern bool RedrawWindow(IntPtr hwnd, IntPtr rect, IntPtr rgn, uint flags);
 }

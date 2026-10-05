@@ -86,8 +86,15 @@ internal sealed class MirrorTarget
     private void Raise()
     {
         if (IsIconic(_hwnd)) ShowWindow(_hwnd, SW_RESTORE);
+        if (!ForceForeground(_hwnd))
+            Log.Warn($"mirror: could not bring the source window to the front (foreground stays \"{WindowCapture.Title(GetForegroundWindow())}\")");
+    }
+
+    /// <summary>Make a window the foreground window from this background process; false if Windows refused.</summary>
+    internal static bool ForceForeground(IntPtr hwnd)
+    {
         IntPtr fg = GetForegroundWindow();
-        if (fg == _hwnd) return;
+        if (fg == hwnd) return true;
         // Windows refuses a background process the foreground: SetForegroundWindow from here merely flashed
         // the taskbar, the window stayed buried behind whatever was in front on this PC, and the viewer's
         // clicks landed on THAT window while its picture never changed -- the "frozen mirror" (2026-09-12).
@@ -100,22 +107,21 @@ internal sealed class MirrorTarget
         // thread to the target's, two foreign queues, was the first attempt and failed on every click.)
         uint me = GetCurrentThreadId();
         uint fgThread = fg != IntPtr.Zero ? GetWindowThreadProcessId(fg, out _) : 0;
-        uint target = GetWindowThreadProcessId(_hwnd, out _);
+        uint target = GetWindowThreadProcessId(hwnd, out _);
         SystemParametersInfo(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, IntPtr.Zero, 0);
         bool toFg = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
         bool toTarget = target != 0 && target != me && target != fgThread && AttachThreadInput(me, target, true);
         try
         {
-            BringWindowToTop(_hwnd);
-            SetForegroundWindow(_hwnd);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
         }
         finally
         {
             if (toTarget) AttachThreadInput(me, target, false);
             if (toFg) AttachThreadInput(me, fgThread, false);
         }
-        if (GetForegroundWindow() != _hwnd)
-            Log.Warn($"mirror: could not bring the source window to the front (foreground stays \"{WindowCapture.Title(GetForegroundWindow())}\")");
+        return GetForegroundWindow() == hwnd;
     }
 
     private void Mouse(byte kind, int x, int y, byte button, int delta)

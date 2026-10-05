@@ -96,7 +96,7 @@ public sealed class Session : IDisposable
         _mirrorSender.Start();
         // Started with the other PC's mouse over here (the tray menu clicked from there): that mouse goes on
         // driving this PC, so the window it just hid must not catch its clicks.
-        if (_injector.Active) Mirror.WindowHider.SetClickThrough(true);
+        if (_injector.Active) { Mirror.WindowHider.SetClickThrough(true); Mirror.WindowHider.StepAside(); }
         Log.Info($"mirror: started for window {hwnd:X}");
         StateChanged?.Invoke();
     }
@@ -400,6 +400,7 @@ public sealed class Session : IDisposable
             // it must end, or the user drives an invisible pointer (2026-10-05).
             if (_injector.Active) CursorHider.Restore(CursorHider.Mirror);
             Mirror.WindowHider.SetClickThrough(_injector.Active);
+            if (_injector.Active) Mirror.WindowHider.StepAside();
             StateChanged?.Invoke();
         };
         _capture.LocalInputWhileControlled += () =>
