@@ -44,6 +44,9 @@ internal sealed class MirrorTarget
                 case FrameType.MirrorKey:
                     if (f.Payload.Length >= 6) Key(f.U16(1), f.U16(3), (f.Payload[5] & 1) != 0, (f.Payload[5] & 2) != 0);
                     break;
+                case FrameType.MirrorResize:
+                    if (f.Payload.Length >= 5) Resize(f.U16(1), f.U16(3));
+                    break;
             }
             // Evidence in the log that the viewer's input reaches this side and where it lands: a line every
             // few seconds while it flows, not one per event.
@@ -81,6 +84,24 @@ internal sealed class MirrorTarget
         if (!GetWindowRect(_hwnd, out var r)) return false;
         Native.MoveCursorAbsolute(r.Left + x, r.Top + y);
         return true;
+    }
+
+    /// <summary>The viewer resized the mirror's window: give the source window that size (the visible frame,
+    /// which is what the mirror shows), keeping its position. A maximized window is restored first, without
+    /// activating it, since a maximized window cannot be sized.</summary>
+    private void Resize(int w, int h)
+    {
+        if (!IsWindow(_hwnd) || w < 50 || h < 50) return;
+        if (IsZoomed(_hwnd)) ShowWindow(_hwnd, SW_SHOWNOACTIVATE);
+        if (!GetWindowRect(_hwnd, out var r)) return;
+        int extraW = 0, extraH = 0;
+        if (UseVisibleBounds && WindowCapture.VisibleBounds(_hwnd) is { IsEmpty: false } vb)
+        {
+            extraW = (r.Right - r.Left) - vb.Width;   // the invisible resize borders around the visible frame
+            extraH = (r.Bottom - r.Top) - vb.Height;
+        }
+        SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, w + extraW, h + extraH, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        Log.Info($"mirror: source window resized to {w}x{h} for the viewer");
     }
 
     private void Raise()
@@ -184,7 +205,10 @@ internal sealed class MirrorTarget
         }
     }
 
-    private const int SW_RESTORE = 9;
+    private const int SW_RESTORE = 9, SW_SHOWNOACTIVATE = 4;
+    private const uint SWP_NOMOVE = 0x2, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10;
+    [DllImport("user32.dll")] private static extern bool IsZoomed(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
     [StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);

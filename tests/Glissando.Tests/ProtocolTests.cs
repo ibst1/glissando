@@ -186,6 +186,11 @@ public class MirrorFrameTests
         Assert.Equal(10, Frame.MirrorIdOf(RoundTrip(Frame.MirrorPointer(10, 5, 6))));
         Assert.Equal(11, Frame.MirrorIdOf(RoundTrip(Frame.MirrorMouse(11, 1, 5, 6, 1, 0))));
         Assert.Equal(12, Frame.MirrorIdOf(RoundTrip(Frame.MirrorKey(12, 0x41, 0x1E, false, false))));
+        Assert.Equal(13, Frame.MirrorIdOf(RoundTrip(Frame.MirrorStop(13))));
+        var resize = RoundTrip(Frame.MirrorResize(14, 1280, 720));
+        Assert.Equal(14, Frame.MirrorIdOf(resize));
+        Assert.Equal(1280, resize.U16(1));
+        Assert.Equal(720, resize.U16(3));
     }
 
     [Fact]

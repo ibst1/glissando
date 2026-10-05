@@ -739,9 +739,20 @@ public sealed class Session : IDisposable
                 if (Authenticated) _injector.ApplyTypedKey(f);
                 break;
 
+            case FrameType.MirrorStop:
+                // The viewer closed the mirror's window: stop sending it, or the next tile opens it again.
+                if (Authenticated)
+                {
+                    Mirror.MirrorSender? closed;
+                    lock (_mirrorGate) _mirrors.TryGetValue(Frame.MirrorIdOf(f), out closed);
+                    if (closed != null) { Log.Info($"mirror #{closed.Id}: closed on {PeerName}"); StopMirror(closed.Hwnd); }
+                }
+                break;
+
             case FrameType.MirrorPointer:
             case FrameType.MirrorMouse:
             case FrameType.MirrorKey:
+            case FrameType.MirrorResize:
                 // The viewer interacting with the window we mirror: apply it to that window here.
                 if (Authenticated)
                 {
@@ -833,7 +844,8 @@ public sealed class Session : IDisposable
 
     private static bool IsReliableType(FrameType t) => t is FrameType.Key or FrameType.TypedKey or FrameType.MouseButton
         or FrameType.Enter or FrameType.Leave or FrameType.ReturnEdge or FrameType.Detached or FrameType.Status
-        or FrameType.MirrorMouse or FrameType.MirrorKey;   // a click or key into a mirror must land; pointer moves may not
+        or FrameType.MirrorMouse or FrameType.MirrorKey    // a click or key into a mirror must land; pointer moves may not
+        or FrameType.MirrorStop or FrameType.MirrorResize;
 
     /// <summary>Send a frame; the ones that must not be lost go several times with a dedup id appended.</summary>
     private void Send(Frame f)

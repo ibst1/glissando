@@ -130,9 +130,12 @@ Glissando.exe --ble connect --console pin the Bluetooth role, show the log
 Sometimes you do not want to move over to the other PC, only to see and use one
 window that lives there -- a build running, a chat, a document. Click the window
 you want, then pick **Mirror the active window** from the tray: it opens on this
-PC as a plain top-most window. Click, type and scroll in it and the input goes
+PC as an ordinary window. Click, type and scroll in it and the input goes
 back to the source window; the source PC brings that window to the front and
-replays the input there, so nothing needs a keyboard at that end.
+replays the input there, so nothing needs a keyboard at that end. The mirror
+behaves like the window itself: it shows the picture at 1:1, resizing it
+resizes the source window (when you let go of the border), and closing it
+stops the mirror.
 
 Several windows can be mirrored at once: click another window and pick the
 tray item again. Each gets its own window on the other PC, titled after its

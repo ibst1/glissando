@@ -5,9 +5,13 @@ using System.Windows.Forms;
 
 namespace Glissando.Mirror;
 
-/// <summary>Destination side: a borderless, top-most window that shows the mirrored source window. A backing
-/// bitmap holds the whole source; each decoded region is blitted into it and the changed part repainted. All
-/// methods run on the UI thread (the receiver marshals to it).
+/// <summary>Destination side: a top-most window that shows the mirrored source window. A backing bitmap holds
+/// the whole source; each decoded region is blitted into it and the changed part repainted. All methods run on
+/// the UI thread (the receiver marshals to it).
+///
+/// It behaves like the window it mirrors: the picture is shown at 1:1, never scaled, and resizing this window
+/// resizes the source window to match (sent when the drag ends), so the program lays itself out again at the
+/// new size instead of being zoomed. Closing it stops the mirror on the source PC.
 ///
 /// The window is also the way to use the mirrored program: the pointer over it, clicks, wheel and keys typed
 /// into it go back to the source PC as mirror-input frames, in source-window pixels (the window may be shown
@@ -24,6 +28,12 @@ internal sealed class MirrorWindow : Form
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _held = [];
     private Point _lastSent = new(-1, -1);
     private long _lastMoveTicks;
+    private bool _sizing;        // the user is dragging a border; the size is sent when the drag ends
+    private bool _sizingByCode;  // ClientSize set here to follow the source; not a request to resize it
+    private bool _closingForMirror;
+
+    /// <summary>True once the user closed this window (not the mirror ending).</summary>
+    public bool ClosedByUser { get; private set; }
 
     private readonly byte _id;
 
@@ -32,7 +42,6 @@ internal sealed class MirrorWindow : Form
         _id = id;
         Text = "Glissando mirror";
         FormBorderStyle = FormBorderStyle.SizableToolWindow;
-        TopMost = true;
         ShowInTaskbar = true;
         StartPosition = FormStartPosition.Manual;
         BackColor = Color.Black;
@@ -54,7 +63,11 @@ internal sealed class MirrorWindow : Form
             old?.Dispose();
 
             var wa = Screen.FromControl(this).WorkingArea;
-            ClientSize = new Size(Math.Min(srcW, wa.Width - 80), Math.Min(srcH, wa.Height - 80));
+            var fit = new Size(Math.Min(srcW, wa.Width - 80), Math.Min(srcH, wa.Height - 80));
+            _sizingByCode = true;
+            try { ClientSize = fit; } finally { _sizingByCode = false; }
+            // A source bigger than this screen would show cropped at 1:1: ask it to take the size that fits.
+            if (fit.Width < srcW || fit.Height < srcH) Input?.Invoke(Frame.MirrorResize(_id, fit.Width, fit.Height));
             // Several mirrors: each opens a little further down and right, not all on top of each other.
             int step = 40 + 32 * (_id % 8);
             if (Location == Point.Empty) Location = new Point(wa.X + step, wa.Y + step);
@@ -73,20 +86,20 @@ internal sealed class MirrorWindow : Form
         // landed at 96/120 of its size, a grid of shrunken tiles with black gutters (2026-09-11).
         using (var g = Graphics.FromImage(_backing))
             g.DrawImage(region, new Rectangle(at, region.Size), new Rectangle(Point.Empty, region.Size), GraphicsUnit.Pixel);
-        // Repaint the touched area, scaled to the (possibly clamped) client size.
-        double sx = (double)ClientSize.Width / _backing.Width, sy = (double)ClientSize.Height / _backing.Height;
-        var dirty = new Rectangle(
-            (int)Math.Floor(at.X * sx) - 1, (int)Math.Floor(at.Y * sy) - 1,
-            (int)Math.Ceiling(region.Width * sx) + 2, (int)Math.Ceiling(region.Height * sy) + 2);
-        Invalidate(dirty);
+        // Repaint the touched area; the picture is shown at 1:1.
+        Invalidate(new Rectangle(at, region.Size));
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         if (_backing == null) { base.OnPaint(e); return; }
-        e.Graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-        e.Graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
-        e.Graphics.DrawImage(_backing, new Rectangle(Point.Empty, ClientSize));
+        // 1:1 from the top-left corner. Where this window is bigger than the picture (the source has not caught
+        // up with a resize yet, or will not go that big), the rest is black.
+        var pic = new Rectangle(0, 0, _backing.Width, _backing.Height);
+        e.Graphics.DrawImage(_backing, pic, pic, GraphicsUnit.Pixel);
+        using var black = new Region(new Rectangle(Point.Empty, ClientSize));
+        black.Exclude(pic);
+        e.Graphics.FillRegion(Brushes.Black, black);
     }
 
     protected override void OnPaintBackground(PaintEventArgs e)
@@ -98,17 +111,46 @@ internal sealed class MirrorWindow : Form
     {
         base.OnResize(e);
         Invalidate();
+        // Maximize, restore, Win+arrow snapping: no drag to wait for, the new size is final.
+        if (!_sizing && !_sizingByCode && WindowState != FormWindowState.Minimized) RequestSourceSize();
+    }
+
+    protected override void OnResizeBegin(EventArgs e) { base.OnResizeBegin(e); _sizing = true; }
+
+    protected override void OnResizeEnd(EventArgs e)
+    {
+        base.OnResizeEnd(e);
+        _sizing = false;
+        RequestSourceSize();   // also ends a plain move, which changes nothing and sends nothing
+    }
+
+    private void RequestSourceSize()
+    {
+        if (_backing == null || ClientSize.Width < 50 || ClientSize.Height < 50) return;
+        if (ClientSize == _backing.Size) return;
+        Input?.Invoke(Frame.MirrorResize(_id, ClientSize.Width, ClientSize.Height));
+    }
+
+    /// <summary>The mirror ended on the source: close without asking it to stop.</summary>
+    public void CloseForMirror() { _closingForMirror = true; Close(); }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        base.OnFormClosing(e);
+        if (_closingForMirror || e.Cancel) return;
+        // Closed here (the X, Alt+F4, Windows shutting down): tell the source to stop this mirror, or its next
+        // tile opens the window again (it did until 2026-10-05).
+        ClosedByUser = true;
+        Input?.Invoke(Frame.MirrorStop(_id));
     }
 
     // ---- interaction: viewer -> source ----
 
-    /// <summary>A client point in source-window pixels, or null before the first frame.</summary>
+    /// <summary>A client point in source-window pixels (1:1), or null before the first frame or off the picture.</summary>
     private Point? ToSource(Point client)
     {
-        if (_backing == null || ClientSize.Width <= 0 || ClientSize.Height <= 0) return null;
-        int x = (int)((long)client.X * _backing.Width / ClientSize.Width);
-        int y = (int)((long)client.Y * _backing.Height / ClientSize.Height);
-        return new Point(Math.Clamp(x, 0, _backing.Width - 1), Math.Clamp(y, 0, _backing.Height - 1));
+        if (_backing == null || client.X < 0 || client.Y < 0 || client.X >= _backing.Width || client.Y >= _backing.Height) return null;
+        return client;
     }
 
     private static byte ButtonCode(MouseButtons b) => b switch

@@ -35,6 +35,8 @@ public enum FrameType : byte
     Bye = 25,           // empty; the sender is exiting or going to sleep: drop the link now, do not wait for timeouts
     TypedKey = 26,      // vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key from the other PC's keyboard that follows the cursor; applied without a control session
     ClipboardImage = 27, // id(1) index(u16) total(u16) + a chunk of a PNG or JPEG: the clipboard's picture (a screenshot), best effort
+    MirrorStop = 28,     // id(1): the viewer closed the mirror's window; the source stops that mirror
+    MirrorResize = 29,   // id(1) w(u16) h(u16): the viewer resized the mirror's window; the source resizes its window to match
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -236,6 +238,17 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     }
 
     public static Frame MirrorEnd(byte id) => new(FrameType.MirrorEnd, [id]);
+
+    public static Frame MirrorStop(byte id) => new(FrameType.MirrorStop, [id]);
+
+    public static Frame MirrorResize(byte id, int w, int h)
+    {
+        var p = new byte[5];
+        p[0] = id;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(1), (ushort)Math.Clamp(w, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(3), (ushort)Math.Clamp(h, 0, 65535));
+        return new(FrameType.MirrorResize, p);
+    }
 
     // ---- interacting with a mirror (viewer -> source) ----
     public static Frame MirrorPointer(byte id, int x, int y)

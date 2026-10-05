@@ -165,7 +165,14 @@ internal sealed class MirrorReceiver
         {
             _window = new MirrorWindow(_id);
             _window.Input = f => Send?.Invoke(f);
-            _window.FormClosed += (_, _) => { _window = null; lock (_gate) Reset(); };
+            _window.FormClosed += (_, _) =>
+            {
+                // Closed by the user (the X): the mirror is over for this PC. The window asked the source to
+                // stop; until its End arrives, tiles still in flight must not open the window again.
+                if (_window is { ClosedByUser: true }) _ended = true;
+                _window = null;
+                lock (_gate) Reset();
+            };
         }
         return _window;
     }
@@ -177,7 +184,7 @@ internal sealed class MirrorReceiver
     {
         _ended = true;
         _decode.Writer.TryComplete();
-        _window?.Close();
+        _window?.CloseForMirror();
         _window = null;
         lock (_gate) Reset();
     }
