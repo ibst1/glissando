@@ -36,13 +36,13 @@ internal sealed class MirrorTarget
             switch (f.Type)
             {
                 case FrameType.MirrorPointer:
-                    Place(f.U16(0), f.U16(2), raise: false);
+                    if (f.Payload.Length >= 5) Place(f.U16(1), f.U16(3), raise: false);
                     break;
                 case FrameType.MirrorMouse:
-                    if (f.Payload.Length >= 8) Mouse(f.Payload[0], f.U16(1), f.U16(3), f.Payload[5], f.I16(6));
+                    if (f.Payload.Length >= 9) Mouse(f.Payload[1], f.U16(2), f.U16(4), f.Payload[6], f.I16(7));
                     break;
                 case FrameType.MirrorKey:
-                    if (f.Payload.Length >= 5) Key(f.U16(0), f.U16(2), (f.Payload[4] & 1) != 0, (f.Payload[4] & 2) != 0);
+                    if (f.Payload.Length >= 6) Key(f.U16(1), f.U16(3), (f.Payload[5] & 1) != 0, (f.Payload[5] & 2) != 0);
                     break;
             }
             // Evidence in the log that the viewer's input reaches this side and where it lands: a line every
@@ -66,7 +66,7 @@ internal sealed class MirrorTarget
     private bool Place(int x, int y, bool raise)
     {
         if (!IsWindow(_hwnd)) return false;
-        if (raise) { WindowHider.SetClickThrough(false); Raise(); }
+        if (raise) { WindowHider.SetClickThrough(_hwnd, false); Raise(); }
         // The cursor is moved here for hover to work in the mirror, but over a window hidden on this PC it is
         // a pointer wandering across nothing (2026-10-05): hide it too, as if it had moved over with the window.
         // It comes back when the window shows again (WindowHider) or this PC's own mouse moves (Session).
@@ -159,7 +159,7 @@ internal sealed class MirrorTarget
     private void Key(ushort vk, ushort scan, bool up, bool ext)
     {
         if (!IsWindow(_hwnd)) return;
-        if (!up) { WindowHider.SetClickThrough(false); Raise(); }
+        if (!up) { WindowHider.SetClickThrough(_hwnd, false); Raise(); }
         var key = (vk, scan, ext);
         if (up) _keysDown.Remove(key); else _keysDown.Add(key);
         // The injector's rule: an injected held modifier sticks only to the very next key, so re-assert every

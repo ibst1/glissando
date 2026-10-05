@@ -132,8 +132,14 @@ window that lives there -- a build running, a chat, a document. Click the window
 you want, then pick **Mirror the active window** from the tray: it opens on this
 PC as a plain top-most window. Click, type and scroll in it and the input goes
 back to the source window; the source PC brings that window to the front and
-replays the input there, so nothing needs a keyboard at that end. Pick the tray
-item again to stop.
+replays the input there, so nothing needs a keyboard at that end.
+
+Several windows can be mirrored at once: click another window and pick the
+tray item again. Each gets its own window on the other PC, titled after its
+source, and the link's capacity is shared out between them. The tray menu
+lists a **Stop mirroring "..."** item for each mirrored window, and **Stop all
+mirrors** when there are several. A mirror also stops by itself when its
+source window closes.
 
 While it is mirrored, the window is invisible on the PC it lives on, as if it
 had moved over (an option, on by default). It keeps its taskbar button and

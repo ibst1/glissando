@@ -89,8 +89,8 @@ internal static class Program
 
         // If the cursor set was swapped out while controlling the other PC, or a mirrored window was made
         // invisible, put them back no matter how we end.
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => { Host.CursorHider.RestoreAll(); Mirror.WindowHider.Unhide(); };
-        AppDomain.CurrentDomain.UnhandledException += (_, _) => { Host.CursorHider.RestoreAll(); Mirror.WindowHider.Unhide(); };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => { Host.CursorHider.RestoreAll(); Mirror.WindowHider.UnhideAll(); };
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => { Host.CursorHider.RestoreAll(); Mirror.WindowHider.UnhideAll(); };
 
         // "Glissando.exe --exit": stop the instance that runs, for when its tray icon is not there to click.
         if (exitOther)
@@ -147,7 +147,7 @@ internal static class Program
         catch (Exception ex)
         {
             Host.CursorHider.RestoreAll();
-            Mirror.WindowHider.Unhide();
+            Mirror.WindowHider.UnhideAll();
             Log.Error("fatal: " + ex);
             MessageBox.Show(ex.ToString(), "Glissando crashed", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return 2;

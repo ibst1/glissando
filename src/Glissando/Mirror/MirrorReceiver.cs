@@ -5,8 +5,8 @@ using System.Threading.Channels;
 namespace Glissando.Mirror;
 
 /// <summary>
-/// Destination side: reassembles mirror chunks into tiles, decodes them and paints them into a
-/// <see cref="MirrorWindow"/>. Frames are best-effort -- if a chunk is lost the partial tile is dropped when the
+/// Destination side of one mirror (one source window; the tray keeps one receiver per mirror id): reassembles
+/// mirror chunks into tiles, decodes them and paints them into a <see cref="MirrorWindow"/>. Frames are best-effort -- if a chunk is lost the partial tile is dropped when the
 /// next tile's chunks start arriving, and the sender's background heal repaints stale tiles.
 ///
 /// Threading: <see cref="Handle"/> is called on the session's receive threads (it is cheap: bookkeeping under a
@@ -18,6 +18,9 @@ internal sealed class MirrorReceiver
 {
     private MirrorWindow? _window;
     private int _srcW, _srcH;
+    private readonly byte _id;
+    private string _title = "";
+    private bool _ended;
 
     /// <summary>Where the mirror window's interactions go (the session sends them to the source PC).</summary>
     public Action<Frame>? Send { get; set; }
@@ -39,8 +42,9 @@ internal sealed class MirrorReceiver
     private int _rxChunks, _rxDone, _rxDropped, _rxDecodeErr;
     private bool _painted;
 
-    public MirrorReceiver()
+    public MirrorReceiver(byte id)
     {
+        _id = id;
         Task.Run(DecodeLoop);
     }
 
@@ -50,10 +54,12 @@ internal sealed class MirrorReceiver
         {
             case FrameType.MirrorBegin:
             {
-                int w = f.U16(0), h = f.U16(2);
-                lock (_gate) { _srcW = w; _srcH = h; }
-                Log.Info($"mirror rx: begin {w}x{h}");
-                Ui?.Invoke(() => Ensure().Prepare(w, h));
+                if (f.Payload.Length < 5) break;
+                int w = f.U16(1), h = f.U16(3);
+                string title = Frame.MirrorTitleOf(f);
+                lock (_gate) { _srcW = w; _srcH = h; _title = title; }
+                Log.Info($"mirror rx #{_id}: begin {w}x{h} \"{title}\"");
+                Ui?.Invoke(() => { if (!_ended) Ensure().Prepare(w, h, title); });
                 break;
             }
             case FrameType.MirrorChunk:
@@ -61,7 +67,8 @@ internal sealed class MirrorReceiver
                 break;
             case FrameType.MirrorEnd:
                 lock (_gate) Reset();
-                Ui?.Invoke(() => _window?.Hide());
+                _decode.Writer.TryComplete();
+                Ui?.Invoke(Close);
                 break;
         }
     }
@@ -69,16 +76,16 @@ internal sealed class MirrorReceiver
     private void MaybeLog()
     {
         if (_log.ElapsedMilliseconds < 2000) return;
-        Log.Info($"mirror rx: {_rxChunks} chunks, {_rxDone} tiles painted, {_rxDropped} incomplete, {_rxDecodeErr} decode errors in {_log.ElapsedMilliseconds} ms");
+        Log.Info($"mirror rx #{_id}: {_rxChunks} chunks, {_rxDone} tiles painted, {_rxDropped} incomplete, {_rxDecodeErr} decode errors in {_log.ElapsedMilliseconds} ms");
         _rxChunks = _rxDone = _rxDropped = _rxDecodeErr = 0; _log.Restart();
     }
 
     private void HandleChunk(Frame f)
     {
         if (f.Payload.Length < Frame.MirrorChunkHeader) return;
-        ushort frameId = f.U16(0), index = f.U16(2), count = f.U16(4);
-        int x = f.U16(6), y = f.U16(8), w = f.U16(10), h = f.U16(12);
-        bool keyframe = f.Payload[14] != 0;
+        ushort frameId = f.U16(1), index = f.U16(3), count = f.U16(5);
+        int x = f.U16(7), y = f.U16(9), w = f.U16(11), h = f.U16(13);
+        bool keyframe = f.Payload[15] != 0;
         if (count == 0) return;
 
         (Rectangle region, bool key, byte[] jpeg, int sw, int sh)? done = null;
@@ -106,6 +113,7 @@ internal sealed class MirrorReceiver
                 int o = 0;
                 foreach (var c in _chunks) { c!.CopyTo(jpeg, o); o += c.Length; }
                 done = (_region, _keyframe, jpeg, _srcW, _srcH);
+                // (the title rides in MirrorBegin; a window opened by a tile before it arrived gets it then)
                 _chunks = []; _have = 0; _count = 0; // _count=0 so the next tile is not miscounted as a drop
             }
         }
@@ -133,13 +141,14 @@ internal sealed class MirrorReceiver
                 {
                     try
                     {
+                        if (_ended) return;
                         var win = Ensure();
-                        win.Prepare(t.srcW, t.srcH);
+                        win.Prepare(t.srcW, t.srcH, _title);
                         win.Blit(t.region.Location, img, t.keyframe);
                         lock (_gate)
                         {
                             _rxDone++;
-                            if (!_painted) { _painted = true; Log.Info($"mirror rx: first tile painted, region {t.region}, backing {t.srcW}x{t.srcH}"); }
+                            if (!_painted) { _painted = true; Log.Info($"mirror rx #{_id}: first tile painted, region {t.region}, backing {t.srcW}x{t.srcH}"); }
                         }
                     }
                     catch (Exception ex) { Log.Warn("mirror paint: " + ex.Message); }
@@ -154,7 +163,7 @@ internal sealed class MirrorReceiver
     {
         if (_window == null || _window.IsDisposed)
         {
-            _window = new MirrorWindow();
+            _window = new MirrorWindow(_id);
             _window.Input = f => Send?.Invoke(f);
             _window.FormClosed += (_, _) => { _window = null; lock (_gate) Reset(); };
         }
@@ -163,9 +172,11 @@ internal sealed class MirrorReceiver
 
     private void Reset() { _chunks = []; _have = 0; _frameId = 0; _count = 0; _painted = false; }
 
-    /// <summary>UI thread only.</summary>
+    /// <summary>UI thread only. The mirror is over: its window closes for good.</summary>
     public void Close()
     {
+        _ended = true;
+        _decode.Writer.TryComplete();
         _window?.Close();
         _window = null;
         lock (_gate) Reset();

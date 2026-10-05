@@ -47,7 +47,12 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private readonly Icon _iconIdle, _iconReady, _iconControlling, _iconControlled, _iconLocked, _iconError;
     private readonly ToolStripMenuItem _lockItem;
     private readonly ToolStripMenuItem _mirrorItem;
-    private readonly Mirror.MirrorReceiver _mirrorRx = new();
+    private readonly ContextMenuStrip _menu;
+    private readonly List<ToolStripItem> _mirrorStopItems = [];
+    // Viewer side: one receiver (and window) per mirror id. An id just ended is ignored for a few seconds, so a
+    // late chunk of a stopped mirror cannot open a fresh empty window. Touched on the receive threads.
+    private readonly Dictionary<byte, Mirror.MirrorReceiver> _mirrorRx = [];
+    private readonly Dictionary<byte, long> _mirrorEnded = [];
     private readonly System.Windows.Forms.Timer _fgTimer = new() { Interval = 400 };
     // The icon watchdog (see TrayIconProbe): checks at 2, 5, 10, 20, 40, 60 and 120 s after start.
     private readonly System.Windows.Forms.Timer _trayCheck = new();
@@ -73,8 +78,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _lockItem = new ToolStripMenuItem("Lock cursor to this PC") { ShortcutKeyDisplayString = "Ctrl+Alt+L", CheckOnClick = true };
         _lockItem.Click += (_, _) => _session?.SetLocked(_lockItem.Checked);
         _mirrorItem = new ToolStripMenuItem("Mirror the active window to the other PC");
-        _mirrorItem.Click += (_, _) => ToggleMirror();
-        var menu = new ContextMenuStrip();
+        _mirrorItem.Click += (_, _) => StartMirror();
+        var menu = _menu = new ContextMenuStrip();
+        menu.Opening += (_, _) => RebuildMirrorStopItems();
         menu.Items.Add(new ToolStripMenuItem($"Glissando {Program.VersionLong}") { Enabled = false });
         menu.Items.Add(_status);
         menu.Items.Add(new ToolStripSeparator());
@@ -125,9 +131,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _session.SettingsChanged += () => _window.BeginInvoke(() => _openForm?.Reload(_settings, _session.PeerName));
         // Incoming window-mirroring frames arrive on the receive threads; the receiver reassembles and decodes
         // there and asks for the UI thread only to paint.
-        _mirrorRx.Ui = a => { try { _window.BeginInvoke(a); } catch (Exception ex) { Log.Warn("mirror ui: " + ex.Message); } };
-        _session.MirrorReceived += f => _mirrorRx.Handle(f);
-        _mirrorRx.Send = f => _session.SendMirrorInput(f);
+        _session.MirrorReceived += OnMirrorFrame;
 
         // Let go of the radio before sleep and start over after it: a live GATT server carried through
         // suspend is what left the Bluetooth stack with a dead LE server (2026-09-13). Suspend runs inline
@@ -207,8 +211,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     /// can target the window the user was using rather than whatever tiny window has focus at menu time.</summary>
     private void TrackForeground()
     {
-        if (_session.Mirroring) return; // keep the chosen window while mirroring
         var h = Mirror.WindowCapture.Foreground();
+        // A mirrored window comes to the front whenever the viewer clicks into it; that is not the user choosing it.
+        if (_session.IsMirroring(h)) return;
         if (h == IntPtr.Zero || h == _window.Handle) return;
         if (Mirror.WindowCapture.ProcessId(h) == (uint)Environment.ProcessId) return;
         if (!Mirror.WindowCapture.Visible(h) || string.IsNullOrEmpty(Mirror.WindowCapture.Title(h))) return;
@@ -216,27 +221,87 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _lastRealWindow = h;
     }
 
-    private void ToggleMirror()
+    /// <summary>Mirror the window last used, beside any already mirrored.</summary>
+    private void StartMirror()
     {
-        if (_session.Mirroring)
+        var h = _lastRealWindow;
+        if (h == IntPtr.Zero || Mirror.WindowCapture.SizeOf(h) == null)
         {
-            _session.StopMirror();
-            _mirrorRx.Close();
+            _tray.ShowBalloonTip(3000, "Glissando", "No window to mirror. Click the window you want, then use the tray menu.", ToolTipIcon.Info);
+            return;
         }
-        else
+        string title = Mirror.WindowCapture.Title(h);
+        if (!_session.StartMirror(h))
         {
-            if (_lastRealWindow == IntPtr.Zero || Mirror.WindowCapture.SizeOf(_lastRealWindow) == null)
-            {
-                _tray.ShowBalloonTip(3000, "Glissando", "No window to mirror. Click the window you want, then use the tray menu.", ToolTipIcon.Info);
-                return;
-            }
-            string title = Mirror.WindowCapture.Title(_lastRealWindow);
-            _session.StartMirror(_lastRealWindow);
-            _tray.ShowBalloonTip(4000, "Glissando", _session.MirrorHidden
-                ? $"Mirroring \"{title}\" to the other PC. It is invisible here until the mirror stops, or until you click or type on this PC."
-                : $"Mirroring \"{title}\" to the other PC.", ToolTipIcon.Info);
+            _tray.ShowBalloonTip(3000, "Glissando", $"\"{title}\" is already mirrored. Click another window first to mirror that one too.", ToolTipIcon.Info);
+            return;
         }
+        _tray.ShowBalloonTip(4000, "Glissando", _session.MirrorHidden(h)
+            ? $"Mirroring \"{title}\" to the other PC. It is invisible here until the mirror stops, or until you click or type on this PC."
+            : $"Mirroring \"{title}\" to the other PC.", ToolTipIcon.Info);
         UpdateTray();
+    }
+
+    /// <summary>One "Stop mirroring" item per mirrored window, under the mirror item, plus "Stop all" for several.</summary>
+    private void RebuildMirrorStopItems()
+    {
+        foreach (var item in _mirrorStopItems) { _menu.Items.Remove(item); item.Dispose(); }
+        _mirrorStopItems.Clear();
+        var windows = _session.MirroredWindows;
+        int at = _menu.Items.IndexOf(_mirrorItem) + 1;
+        foreach (var (hwnd, title) in windows)
+        {
+            string shown = title.Length > 60 ? title[..57] + "..." : title == "" ? $"window {hwnd:X}" : title;
+            var item = new ToolStripMenuItem($"Stop mirroring \"{shown.Replace("&", "&&")}\"");
+            item.Click += (_, _) => { _session.StopMirror(hwnd); UpdateTray(); };
+            _mirrorStopItems.Add(item);
+        }
+        if (windows.Length > 1)
+        {
+            var all = new ToolStripMenuItem("Stop all mirrors");
+            all.Click += (_, _) => { _session.StopAllMirrors(); UpdateTray(); };
+            _mirrorStopItems.Add(all);
+        }
+        foreach (var item in _mirrorStopItems) _menu.Items.Insert(at++, item);
+    }
+
+    /// <summary>Receive thread: route a mirror frame to its receiver, opening one for a new mirror.</summary>
+    private void OnMirrorFrame(Frame f)
+    {
+        byte id = Frame.MirrorIdOf(f);
+        Mirror.MirrorReceiver? rx;
+        lock (_mirrorRx)
+        {
+            long now = Environment.TickCount64;
+            if (_mirrorEnded.TryGetValue(id, out long endedAt))
+            {
+                if (now - endedAt < 5000) return;
+                _mirrorEnded.Remove(id);
+            }
+            if (f.Type == FrameType.MirrorEnd)
+            {
+                _mirrorEnded[id] = now;
+                if (!_mirrorRx.Remove(id, out rx)) return;
+            }
+            else if (!_mirrorRx.TryGetValue(id, out rx))
+            {
+                rx = new Mirror.MirrorReceiver(id)
+                {
+                    Ui = a => { try { _window.BeginInvoke(a); } catch (Exception ex) { Log.Warn("mirror ui: " + ex.Message); } },
+                    Send = _session.SendMirrorInput,
+                };
+                _mirrorRx[id] = rx;
+            }
+        }
+        rx.Handle(f);
+    }
+
+    /// <summary>UI thread: close every viewer window (exit).</summary>
+    private void CloseAllMirrorReceivers()
+    {
+        Mirror.MirrorReceiver[] all;
+        lock (_mirrorRx) { all = [.. _mirrorRx.Values]; _mirrorRx.Clear(); }
+        foreach (var rx in all) rx.Close();
     }
 
     private async void CopyDiagnostics()
@@ -264,8 +329,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         string text = _session.StatusText;
         _status.Text = text;
         _lockItem.Checked = _session.Locked;
-        _mirrorItem.Checked = _session.Mirroring;
-        _mirrorItem.Enabled = _session.Authenticated || _session.Mirroring;
+        _mirrorItem.Enabled = _session.Authenticated;
         bool mismatch = _session.TransportStatus.StartsWith("other PC runs");
         if (mismatch && !_versionWarned)
         {
@@ -374,7 +438,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             _trayCheck.Stop();
             _trayCheck.Dispose();
             InstanceSignals.Dispose();
-            _mirrorRx.Close();
+            CloseAllMirrorReceivers();
             var sw = System.Diagnostics.Stopwatch.StartNew();
             _session.Dispose();
             _capture.Dispose();

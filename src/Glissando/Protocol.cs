@@ -24,12 +24,13 @@ public enum FrameType : byte
     ControlAlive = 15, // sent periodically by the controller while remote; its absence releases the controlled PC
     Reliable = 16,   // seq(u32) + an inner encoded frame; delivered in order, retransmitted until acked
     Ack = 17,        // seq(u32): every reliable frame up to and including this has been delivered
-    MirrorBegin = 18, // window mirroring starts/resizes: srcW(u16) srcH(u16)
-    MirrorChunk = 19, // frameId(u16) index(u16) count(u16) x(u16) y(u16) w(u16) h(u16) keyframe(1) + JPEG chunk
-    MirrorEnd = 20,   // mirroring stopped; the receiver hides its window
-    MirrorPointer = 21, // x(u16) y(u16): the viewer's pointer over the mirror, in source-window pixels (best effort)
-    MirrorMouse = 22,   // kind(1: 1=down 2=up 3=wheel 4=hwheel) x(u16) y(u16) button(1) delta(i16): a click or wheel on the mirror
-    MirrorKey = 23,     // vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key typed into the mirror
+    // Every mirror frame starts with the mirror's id(1), so several windows can be mirrored at once.
+    MirrorBegin = 18, // id(1) srcW(u16) srcH(u16) title(UTF-8): window mirroring starts/resizes
+    MirrorChunk = 19, // id(1) frameId(u16) index(u16) count(u16) x(u16) y(u16) w(u16) h(u16) keyframe(1) + JPEG chunk
+    MirrorEnd = 20,   // id(1): mirroring stopped; the receiver closes that mirror's window
+    MirrorPointer = 21, // id(1) x(u16) y(u16): the viewer's pointer over the mirror, in source-window pixels (best effort)
+    MirrorMouse = 22,   // id(1) kind(1: 1=down 2=up 3=wheel 4=hwheel) x(u16) y(u16) button(1) delta(i16): a click or wheel on the mirror
+    MirrorKey = 23,     // id(1) vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key typed into the mirror
     UdpProbe = 24,      // empty; sent over the UDP pixel path to punch it through the firewalls and keep it up
     Bye = 25,           // empty; the sender is exiting or going to sleep: drop the link now, do not wait for timeouts
     TypedKey = 26,      // vk(u16) scan(u16) flags(1: bit0=up bit1=extended): a key from the other PC's keyboard that follows the cursor; applied without a control session
@@ -195,62 +196,76 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     public static Frame HelloAck(ReadOnlySpan<byte> peerNonce) => new(FrameType.HelloAck, peerNonce[..16].ToArray());
 
     // ---- window mirroring ----
-    public const int MirrorChunkHeader = 15;
+    public const int MirrorChunkHeader = 16;
 
-    public static Frame MirrorBegin(int w, int h)
+    /// <summary>Which mirror a mirror frame belongs to (its first byte).</summary>
+    public static byte MirrorIdOf(Frame f) => f.Payload.Length > 0 ? f.Payload[0] : (byte)0;
+
+    public static Frame MirrorBegin(byte id, int w, int h, string title = "")
     {
-        var p = new byte[4];
-        BinaryPrimitives.WriteUInt16LittleEndian(p, (ushort)Math.Clamp(w, 0, 65535));
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), (ushort)Math.Clamp(h, 0, 65535));
+        var t = Encoding.UTF8.GetBytes(title.Length > 120 ? title[..120] : title);
+        var p = new byte[5 + t.Length];
+        p[0] = id;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(1), (ushort)Math.Clamp(w, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(3), (ushort)Math.Clamp(h, 0, 65535));
+        t.CopyTo(p, 5);
         return new(FrameType.MirrorBegin, p);
     }
+
+    /// <summary>The source window's title carried in a MirrorBegin.</summary>
+    public static string MirrorTitleOf(Frame begin) =>
+        begin.Payload.Length > 5 ? Encoding.UTF8.GetString(begin.Payload, 5, begin.Payload.Length - 5) : "";
 
     /// <summary>One chunk of a captured region's JPEG. The region and keyframe flag ride in every chunk so a
     /// frame reassembles whatever order chunks arrive, and a keyframe alone (region = the whole window) tells
     /// the receiver the source size even if MirrorBegin was lost.</summary>
-    public static Frame MirrorChunk(ushort frameId, ushort index, ushort count, int x, int y, int w, int h, bool keyframe, ReadOnlySpan<byte> data)
+    public static Frame MirrorChunk(byte id, ushort frameId, ushort index, ushort count, int x, int y, int w, int h, bool keyframe, ReadOnlySpan<byte> data)
     {
         var p = new byte[MirrorChunkHeader + data.Length];
-        BinaryPrimitives.WriteUInt16LittleEndian(p, frameId);
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), index);
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(4), count);
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(6), (ushort)Math.Clamp(x, 0, 65535));
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(8), (ushort)Math.Clamp(y, 0, 65535));
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(10), (ushort)Math.Clamp(w, 0, 65535));
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(12), (ushort)Math.Clamp(h, 0, 65535));
-        p[14] = keyframe ? (byte)1 : (byte)0;
+        p[0] = id;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(1), frameId);
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(3), index);
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(5), count);
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(7), (ushort)Math.Clamp(x, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(9), (ushort)Math.Clamp(y, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(11), (ushort)Math.Clamp(w, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(13), (ushort)Math.Clamp(h, 0, 65535));
+        p[15] = keyframe ? (byte)1 : (byte)0;
         data.CopyTo(p.AsSpan(MirrorChunkHeader));
         return new(FrameType.MirrorChunk, p);
     }
 
-    public static Frame MirrorEnd() => new(FrameType.MirrorEnd, []);
+    public static Frame MirrorEnd(byte id) => new(FrameType.MirrorEnd, [id]);
 
     // ---- interacting with a mirror (viewer -> source) ----
-    public static Frame MirrorPointer(int x, int y)
+    public static Frame MirrorPointer(byte id, int x, int y)
     {
-        var p = new byte[4];
-        BinaryPrimitives.WriteUInt16LittleEndian(p, (ushort)Math.Clamp(x, 0, 65535));
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), (ushort)Math.Clamp(y, 0, 65535));
+        var p = new byte[5];
+        p[0] = id;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(1), (ushort)Math.Clamp(x, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(3), (ushort)Math.Clamp(y, 0, 65535));
         return new(FrameType.MirrorPointer, p);
     }
 
-    public static Frame MirrorMouse(byte kind, int x, int y, byte button, int delta)
+    public static Frame MirrorMouse(byte id, byte kind, int x, int y, byte button, int delta)
     {
-        var p = new byte[8];
-        p[0] = kind;
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(1), (ushort)Math.Clamp(x, 0, 65535));
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(3), (ushort)Math.Clamp(y, 0, 65535));
-        p[5] = button;
-        BinaryPrimitives.WriteInt16LittleEndian(p.AsSpan(6), (short)Math.Clamp(delta, short.MinValue, short.MaxValue));
+        var p = new byte[9];
+        p[0] = id;
+        p[1] = kind;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), (ushort)Math.Clamp(x, 0, 65535));
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(4), (ushort)Math.Clamp(y, 0, 65535));
+        p[6] = button;
+        BinaryPrimitives.WriteInt16LittleEndian(p.AsSpan(7), (short)Math.Clamp(delta, short.MinValue, short.MaxValue));
         return new(FrameType.MirrorMouse, p);
     }
 
-    public static Frame MirrorKey(ushort vk, ushort scan, bool up, bool extended)
+    public static Frame MirrorKey(byte id, ushort vk, ushort scan, bool up, bool extended)
     {
-        var p = new byte[5];
-        BinaryPrimitives.WriteUInt16LittleEndian(p, vk);
-        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(2), scan);
-        p[4] = (byte)((up ? 1 : 0) | (extended ? 2 : 0));
+        var p = new byte[6];
+        p[0] = id;
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(1), vk);
+        BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(3), scan);
+        p[5] = (byte)((up ? 1 : 0) | (extended ? 2 : 0));
         return new(FrameType.MirrorKey, p);
     }
 

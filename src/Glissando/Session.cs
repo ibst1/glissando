@@ -66,7 +66,10 @@ public sealed class Session : IDisposable
     private readonly InputCapture _capture;
     private readonly InputInjector _injector;
     private readonly IClipboardAccess _clipboard;
-    private Mirror.MirrorSender? _mirrorSender;
+    // The windows this PC mirrors to the other one, by mirror id (the first byte of every mirror frame).
+    private readonly Dictionary<byte, Mirror.MirrorSender> _mirrors = [];
+    private readonly object _mirrorGate = new();
+    private byte _lastMirrorId;
     private Crypto? _crypto;
 
     // The UDP pixel path (see UdpPixelLink): optional, beside BLE, with a crypto of its own nonce space.
@@ -81,34 +84,65 @@ public sealed class Session : IDisposable
     /// the UI thread and into a MirrorReceiver.</summary>
     public event Action<Frame>? MirrorReceived;
 
-    /// <summary>True while this PC is mirroring one of its windows to the other PC.</summary>
-    public bool Mirroring => _mirrorSender != null;
+    /// <summary>True while this PC is mirroring at least one of its windows to the other PC.</summary>
+    public bool Mirroring { get { lock (_mirrorGate) return _mirrors.Count > 0; } }
 
-    /// <summary>True while the mirrored window is invisible on this PC.</summary>
-    public bool MirrorHidden => _mirrorSender?.Hidden ?? false;
+    private Mirror.MirrorSender[] Mirrors { get { lock (_mirrorGate) return [.. _mirrors.Values]; } }
 
-    /// <summary>Start mirroring the given window to the peer (replaces any current one).</summary>
-    public void StartMirror(IntPtr hwnd)
+    /// <summary>The windows mirrored now, with their titles, oldest first.</summary>
+    public (IntPtr Hwnd, string Title)[] MirroredWindows => Mirrors.OrderBy(m => m.Id).Select(m => (m.Hwnd, m.Title)).ToArray();
+
+    public bool IsMirroring(IntPtr hwnd) => Mirrors.Any(m => m.Hwnd == hwnd);
+
+    /// <summary>True while this window is mirrored and invisible on this PC.</summary>
+    public bool MirrorHidden(IntPtr hwnd) => Mirrors.Any(m => m.Hwnd == hwnd && m.Hidden);
+
+    /// <summary>Start mirroring the given window to the peer, beside any already mirrored. False if it already is.</summary>
+    public bool StartMirror(IntPtr hwnd)
     {
-        StopMirror();
-        _mirrorSender = new Mirror.MirrorSender(hwnd, Enqueue, () => Volatile.Read(ref _queued), slowLink: !_channel.IsCentral, hide: _s.HideMirroredWindow,
-            udpUp: () => UdpUp, sendUdp: SendUdp);
-        _mirrorSender.Start();
+        Mirror.MirrorSender m;
+        lock (_mirrorGate)
+        {
+            if (_mirrors.Values.Any(x => x.Hwnd == hwnd)) return false;
+            // Ids go round 1..255 rather than restarting at 1, so a late frame of a mirror just stopped is never
+            // taken for a new one (the viewer also ignores an id for a few seconds after its End).
+            byte id = _lastMirrorId;
+            do id = (byte)(id == 255 ? 1 : id + 1); while (_mirrors.ContainsKey(id));
+            _lastMirrorId = id;
+            m = new Mirror.MirrorSender(hwnd, id, () => { lock (_mirrorGate) return _mirrors.Count; }, Enqueue, () => Volatile.Read(ref _queued),
+                slowLink: !_channel.IsCentral, hide: _s.HideMirroredWindow, udpUp: () => UdpUp, sendUdp: SendUdp);
+            m.Gone += gone => StopMirror(gone.Hwnd);
+            _mirrors[id] = m;
+        }
+        m.Start();
         // Started with the other PC's mouse over here (the tray menu clicked from there): that mouse goes on
         // driving this PC, so the window it just hid must not catch its clicks.
         if (_injector.Active) { Mirror.WindowHider.SetClickThrough(true); Mirror.WindowHider.StepAside(); }
-        Log.Info($"mirror: started for window {hwnd:X}");
+        Log.Info($"mirror #{m.Id}: started for window {hwnd:X} \"{m.Title}\"");
         StateChanged?.Invoke();
+        return true;
     }
 
     /// <summary>Viewer side: an interaction with the mirror (pointer, click, wheel, key) for the source PC.</summary>
     public void SendMirrorInput(Frame f) { if (Authenticated) Send(f); }
 
-    public void StopMirror()
+    public void StopMirror(IntPtr hwnd)
     {
-        var s = _mirrorSender;
-        _mirrorSender = null;
-        if (s != null) { s.Stop(); Log.Info("mirror: stopped"); StateChanged?.Invoke(); }
+        Mirror.MirrorSender? m;
+        lock (_mirrorGate)
+        {
+            m = _mirrors.Values.FirstOrDefault(x => x.Hwnd == hwnd);
+            if (m != null) _mirrors.Remove(m.Id);
+        }
+        if (m == null) return;
+        m.Stop();
+        Log.Info($"mirror #{m.Id}: stopped");
+        StateChanged?.Invoke();
+    }
+
+    public void StopAllMirrors()
+    {
+        foreach (var m in Mirrors) StopMirror(m.Hwnd);
     }
     private readonly Channel<Frame> _queue = Channel.CreateUnbounded<Frame>(new UnboundedChannelOptions { SingleReader = true });
     private readonly CancellationTokenSource _cts = new();
@@ -416,11 +450,15 @@ public sealed class Session : IDisposable
             // Show a hidden mirrored window again only when the person at this PC actually runs into it: a click
             // where it invisibly is, or typing while it holds the focus. Any click or key at all was too eager -
             // the user sat at this PC working in another window and the mirror never stayed hidden (2026-09-13).
-            if (_mirrorSender is not { Hidden: true } m) return;
-            bool hit = at is Point p ? Mirror.WindowCapture.VisibleBounds(m.Hwnd).Contains(p) : Mirror.WindowCapture.Foreground() == m.Hwnd;
-            if (!hit) return;
-            m.Reveal(at is Point q ? $"a click at ({q.X},{q.Y}) on the hidden window" : "a key typed while the hidden window had the focus");
-            StateChanged?.Invoke();
+            foreach (var m in Mirrors)
+            {
+                if (!m.Hidden) continue;
+                bool hit = at is Point p ? Mirror.WindowCapture.VisibleBounds(m.Hwnd).Contains(p) : Mirror.WindowCapture.Foreground() == m.Hwnd;
+                if (!hit) continue;
+                m.Reveal(at is Point q ? $"a click at ({q.X},{q.Y}) on the hidden window" : "a key typed while the hidden window had the focus");
+                StateChanged?.Invoke();
+                break;   // a click lands on one window only, the top one
+            }
         };
         _injector.InputWhileInactive += () =>
         {
@@ -705,7 +743,12 @@ public sealed class Session : IDisposable
             case FrameType.MirrorMouse:
             case FrameType.MirrorKey:
                 // The viewer interacting with the window we mirror: apply it to that window here.
-                if (Authenticated) _mirrorSender?.Input(f);
+                if (Authenticated)
+                {
+                    Mirror.MirrorSender? target;
+                    lock (_mirrorGate) _mirrors.TryGetValue(Frame.MirrorIdOf(f), out target);
+                    target?.Input(f);
+                }
                 break;
 
             case FrameType.MirrorBegin:
@@ -1142,7 +1185,7 @@ public sealed class Session : IDisposable
 
     public void Dispose()
     {
-        StopMirror();
+        StopAllMirrors();
         // Tell the other PC before the link goes. Being controlled, send Detached so the controller lets go of
         // the pointer at once (its own fallbacks - link down, peer timeout - take seconds, spent staring at a
         // dead remote screen). Controlling, Release() below sends Leave, which frees the controlled PC without

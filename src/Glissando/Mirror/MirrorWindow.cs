@@ -25,8 +25,11 @@ internal sealed class MirrorWindow : Form
     private Point _lastSent = new(-1, -1);
     private long _lastMoveTicks;
 
-    public MirrorWindow()
+    private readonly byte _id;
+
+    public MirrorWindow(byte id)
     {
+        _id = id;
         Text = "Glissando mirror";
         FormBorderStyle = FormBorderStyle.SizableToolWindow;
         TopMost = true;
@@ -38,9 +41,11 @@ internal sealed class MirrorWindow : Form
     }
 
     /// <summary>Ensure the backing bitmap and window match the source size; show the window if hidden.</summary>
-    public void Prepare(int srcW, int srcH)
+    public void Prepare(int srcW, int srcH, string title = "")
     {
         if (srcW <= 0 || srcH <= 0) return;
+        string text = title != "" ? $"{title} - Glissando mirror" : "Glissando mirror";
+        if (Text != text) Text = text;
         if (_backing == null || _backing.Width != srcW || _backing.Height != srcH)
         {
             var old = _backing;
@@ -50,7 +55,9 @@ internal sealed class MirrorWindow : Form
 
             var wa = Screen.FromControl(this).WorkingArea;
             ClientSize = new Size(Math.Min(srcW, wa.Width - 80), Math.Min(srcH, wa.Height - 80));
-            if (Location == Point.Empty) Location = new Point(wa.X + 40, wa.Y + 40);
+            // Several mirrors: each opens a little further down and right, not all on top of each other.
+            int step = 40 + 32 * (_id % 8);
+            if (Location == Point.Empty) Location = new Point(wa.X + step, wa.Y + step);
         }
         if (!Visible) Show();
     }
@@ -119,7 +126,7 @@ internal sealed class MirrorWindow : Form
         if (now - _lastMoveTicks < Stopwatch.Frequency / 40) return;
         _lastMoveTicks = now;
         _lastSent = p;
-        Input?.Invoke(Frame.MirrorPointer(p.X, p.Y));
+        Input?.Invoke(Frame.MirrorPointer(_id, p.X, p.Y));
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -127,20 +134,20 @@ internal sealed class MirrorWindow : Form
         base.OnMouseDown(e);
         Focus();
         if (ToSource(e.Location) is Point p && ButtonCode(e.Button) is byte b and > 0)
-            Input?.Invoke(Frame.MirrorMouse(1, p.X, p.Y, b, 0));
+            Input?.Invoke(Frame.MirrorMouse(_id, 1, p.X, p.Y, b, 0));
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
         if (ToSource(e.Location) is Point p && ButtonCode(e.Button) is byte b and > 0)
-            Input?.Invoke(Frame.MirrorMouse(2, p.X, p.Y, b, 0));
+            Input?.Invoke(Frame.MirrorMouse(_id, 2, p.X, p.Y, b, 0));
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
         base.OnMouseWheel(e);
-        if (ToSource(e.Location) is Point p) Input?.Invoke(Frame.MirrorMouse(3, p.X, p.Y, 0, e.Delta));
+        if (ToSource(e.Location) is Point p) Input?.Invoke(Frame.MirrorMouse(_id, 3, p.X, p.Y, 0, e.Delta));
     }
 
     private const int WM_MOUSEHWHEEL = 0x020E;
@@ -165,7 +172,7 @@ internal sealed class MirrorWindow : Form
                 bool ext = ((lp >> 24) & 1) != 0;
                 var key = (vk, scan, ext);
                 if (up) _held.Remove(key); else _held.Add(key);
-                Input?.Invoke(Frame.MirrorKey(vk, scan, up, ext));
+                Input?.Invoke(Frame.MirrorKey(_id, vk, scan, up, ext));
                 return; // swallowed here: the key is for the source window, not for this form
             }
             case WM_MOUSEHWHEEL:
@@ -173,7 +180,7 @@ internal sealed class MirrorWindow : Form
                 int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
                 long lp = m.LParam.ToInt64();
                 var screen = new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
-                if (ToSource(PointToClient(screen)) is Point p) Input?.Invoke(Frame.MirrorMouse(4, p.X, p.Y, 0, delta));
+                if (ToSource(PointToClient(screen)) is Point p) Input?.Invoke(Frame.MirrorMouse(_id, 4, p.X, p.Y, 0, delta));
                 return;
             }
         }
@@ -185,7 +192,7 @@ internal sealed class MirrorWindow : Form
         base.OnDeactivate(e);
         // Focus left with keys down (Alt+Tab away, a click elsewhere): release them on the source now, since
         // their real key-ups will never reach this window.
-        foreach (var k in _held.ToArray()) Input?.Invoke(Frame.MirrorKey(k.vk, k.scan, up: true, k.ext));
+        foreach (var k in _held.ToArray()) Input?.Invoke(Frame.MirrorKey(_id, k.vk, k.scan, up: true, k.ext));
         _held.Clear();
     }
 

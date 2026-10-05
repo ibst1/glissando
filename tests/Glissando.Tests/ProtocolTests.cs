@@ -167,3 +167,49 @@ public class MovePacingTests
     [InlineData(3000, MovePacing.MaxGapMs)]   // never slower than 25 moves a second
     public void GapFollowsRoundTrip(double rtt, int expected) => Assert.Equal(expected, MovePacing.GapMs(rtt));
 }
+
+public class MirrorFrameTests
+{
+    private static Frame RoundTrip(Frame f)
+    {
+        Assert.True(Frame.TryDecode(f.Encode(), out var back));
+        return back;
+    }
+
+    [Fact]
+    public void EveryMirrorFrame_CarriesItsId()
+    {
+        byte[] data = [1, 2, 3];
+        Assert.Equal(7, Frame.MirrorIdOf(RoundTrip(Frame.MirrorBegin(7, 800, 600, "Doc"))));
+        Assert.Equal(8, Frame.MirrorIdOf(RoundTrip(Frame.MirrorChunk(8, 1, 0, 1, 0, 0, 128, 128, true, data))));
+        Assert.Equal(9, Frame.MirrorIdOf(RoundTrip(Frame.MirrorEnd(9))));
+        Assert.Equal(10, Frame.MirrorIdOf(RoundTrip(Frame.MirrorPointer(10, 5, 6))));
+        Assert.Equal(11, Frame.MirrorIdOf(RoundTrip(Frame.MirrorMouse(11, 1, 5, 6, 1, 0))));
+        Assert.Equal(12, Frame.MirrorIdOf(RoundTrip(Frame.MirrorKey(12, 0x41, 0x1E, false, false))));
+    }
+
+    [Fact]
+    public void Begin_CarriesSizeAndTitle()
+    {
+        var f = RoundTrip(Frame.MirrorBegin(3, 1920, 1080, "Rapport – Word"));
+        Assert.Equal(1920, f.U16(1));
+        Assert.Equal(1080, f.U16(3));
+        Assert.Equal("Rapport – Word", Frame.MirrorTitleOf(f));
+    }
+
+    [Fact]
+    public void Chunk_HeaderFieldsAndDataAfterTheId()
+    {
+        byte[] data = [9, 8, 7];
+        var f = RoundTrip(Frame.MirrorChunk(5, 300, 2, 4, 256, 512, 128, 64, false, data));
+        Assert.Equal(300, f.U16(1));
+        Assert.Equal(2, f.U16(3));
+        Assert.Equal(4, f.U16(5));
+        Assert.Equal(256, f.U16(7));
+        Assert.Equal(512, f.U16(9));
+        Assert.Equal(128, f.U16(11));
+        Assert.Equal(64, f.U16(13));
+        Assert.Equal(0, f.Payload[15]);
+        Assert.Equal(data, f.Payload[Frame.MirrorChunkHeader..]);
+    }
+}

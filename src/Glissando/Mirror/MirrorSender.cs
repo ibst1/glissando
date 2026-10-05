@@ -43,6 +43,8 @@ internal sealed class MirrorSender
     private const int UdpRefreshEveryMs = 40;
 
     private readonly IntPtr _hwnd;
+    private readonly byte _id;
+    private readonly Func<int> _mirrorCount;
     private readonly Action<Frame> _send;
     private readonly Func<int> _queueDepth;
     private readonly bool _slowLink;
@@ -53,12 +55,16 @@ internal sealed class MirrorSender
     private CancellationTokenSource? _cts;
     private GpuCapture? _gpu;
 
+    /// <param name="id">This mirror's id in every frame, so several windows can be mirrored at once.</param>
+    /// <param name="mirrorCount">How many mirrors run now: the link's byte budget is shared out between them.</param>
     /// <param name="send">The BLE path: control frames always, pixels when UDP is down.</param>
     /// <param name="udpUp">Whether the UDP pixel path is up right now (re-read every frame).</param>
     /// <param name="sendUdp">The UDP path for pixel chunks.</param>
-    public MirrorSender(IntPtr hwnd, Action<Frame> send, Func<int> queueDepth, bool slowLink, bool hide, Func<bool> udpUp, Action<Frame> sendUdp)
+    public MirrorSender(IntPtr hwnd, byte id, Func<int> mirrorCount, Action<Frame> send, Func<int> queueDepth, bool slowLink, bool hide, Func<bool> udpUp, Action<Frame> sendUdp)
     {
         _hwnd = hwnd;
+        _id = id;
+        _mirrorCount = mirrorCount;
         _send = send;
         _queueDepth = queueDepth;
         _slowLink = slowLink;
@@ -75,6 +81,13 @@ internal sealed class MirrorSender
     public bool Hidden => WindowHider.IsHidden(_hwnd);
 
     public IntPtr Hwnd => _hwnd;
+    public byte Id => _id;
+
+    /// <summary>The source window's title, for the tray menu and the viewer's window.</summary>
+    public string Title => WindowCapture.Title(_hwnd);
+
+    /// <summary>Raised on the capture thread when the source window has closed; the session drops the mirror.</summary>
+    public event Action<MirrorSender>? Gone;
 
     /// <summary>Someone clicked or typed on this PC: show the window here again, and keep mirroring it. An
     /// invisible foreground window would otherwise swallow their clicks.</summary>
@@ -82,7 +95,7 @@ internal sealed class MirrorSender
     {
         if (!Hidden) return;
         Log.Info($"mirror: local input on this PC ({why}); showing the mirrored window here again");
-        WindowHider.Unhide();
+        WindowHider.Unhide(_hwnd);
     }
 
     public void Start()
@@ -97,11 +110,11 @@ internal sealed class MirrorSender
     {
         _cts?.Cancel();
         _target.ReleaseAll();
-        WindowHider.Unhide();
+        WindowHider.Unhide(_hwnd);
         // Three copies, like MirrorBegin: a lone MirrorEnd is a best-effort frame, and on the slow direction it
         // got lost often enough that the viewer's window stayed open showing a stale picture, which read as
         // "the mirror cannot be turned off" (2026-09-12). The receiver's End is idempotent.
-        try { for (int i = 0; i < 3; i++) _send(Frame.MirrorEnd()); } catch { }
+        try { for (int i = 0; i < 3; i++) _send(Frame.MirrorEnd(_id)); } catch { }
     }
 
     private void Loop(CancellationToken ct)
@@ -109,11 +122,14 @@ internal sealed class MirrorSender
         _gpu = GpuCapture.TryCreate(_hwnd);
         _target.UseVisibleBounds = _gpu != null;
         Log.Info(_gpu != null ? "mirror tx: capture via Windows.Graphics.Capture (GPU)" : "mirror tx: capture via PrintWindow");
-        try { LoopCore(ct); }
+        bool gone = false;
+        try { gone = LoopCore(ct); }
         finally { _gpu?.Dispose(); _gpu = null; }
+        if (gone) Gone?.Invoke(this);
     }
 
-    private void LoopCore(CancellationToken ct)
+    /// <summary>Runs until cancelled (false) or the source window is gone (true).</summary>
+    private bool LoopCore(CancellationToken ct)
     {
         byte[]? prev = null, spare = null;
         int prevStride = 0, prevW = 0, prevH = 0, lastW = -1, lastH = -1, lastTile = 0, refreshCursor = 0;
@@ -150,7 +166,7 @@ internal sealed class MirrorSender
                 {
                     // GPU: a frame only when the window changed; otherwise nothing new (cur = prev) and the
                     // heal below still gets its turn. TryGetFrame already waited up to one interval.
-                    if (_gpu.Closed || WindowCapture.SizeOf(_hwnd) == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(); break; }
+                    if (_gpu.Closed || WindowCapture.SizeOf(_hwnd) == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(_hwnd); return true; }
                     var buf = spare;
                     fresh = _gpu.TryGetFrame(ref buf, interval, out w, out h, out stride);
                     if (fresh) { cur = buf!; spare = prev; WindowCapture.OverlayPopupsOnto(cur, stride, w, h, _hwnd); }
@@ -161,7 +177,7 @@ internal sealed class MirrorSender
                 else
                 {
                     bmp = WindowCapture.Capture(_hwnd, hidden, out bool fromScreen);
-                    if (bmp == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(); break; }
+                    if (bmp == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(_hwnd); return true; }
                     mode = hidden ? "hidden" : fromScreen ? "screen" : "print";
                     w = bmp.Width; h = bmp.Height;
                     cur = WindowCapture.Pixels(bmp, out stride);
@@ -181,7 +197,8 @@ internal sealed class MirrorSender
 
                 if (w != lastW || h != lastH)
                 {
-                    for (int i = 0; i < 3; i++) _send(Frame.MirrorBegin(w, h)); // redundant: the size must arrive
+                    string title = Title;
+                    for (int i = 0; i < 3; i++) _send(Frame.MirrorBegin(_id, w, h, title)); // redundant: the size must arrive
                     lastW = w; lastH = h; refreshCursor = 0;                    // a fresh heal pass for the new size
                     if (!fresh || !ReferenceEquals(cur, prev)) prev = null;
                     Log.Info($"mirror tx: begin {w}x{h}");
@@ -203,7 +220,8 @@ internal sealed class MirrorSender
                 // Decide the frame's tiles: every dirty tile within the byte budget, deferring the rest.
                 var regions = new List<Rectangle>();
                 var fulls = new List<bool>();
-                int budget = udp ? UdpFrameBytes : _slowLink ? SlowFrameBytes : FastFrameBytes;
+                // Several mirrors share the link: each gets its part of the budget, so together they load it as one did.
+                int budget = (udp ? UdpFrameBytes : _slowLink ? SlowFrameBytes : FastFrameBytes) / Math.Max(1, _mirrorCount());
                 int planned = 0;
                 for (int idx = 0; (first || fresh) && idx < tileCount && !ct.IsCancellationRequested; idx++)
                 {
@@ -248,7 +266,7 @@ internal sealed class MirrorSender
                     for (int i = 0; i < regions.Count && !ct.IsCancellationRequested; i++)
                     {
                         if (!udp) while (_queueDepth() > PaceBelow && !ct.IsCancellationRequested) ct.WaitHandle.WaitOne(3);
-                        SendTile(frameId++, regions[i], fulls[i], jpegs[i], chunk, sender);
+                        SendTile(_id, frameId++, regions[i], fulls[i], jpegs[i], chunk, sender);
                         sum += jpegs[i].Length;
                         txChunks += Math.Max(1, (jpegs[i].Length + chunk - 1) / chunk);
                     }
@@ -267,23 +285,24 @@ internal sealed class MirrorSender
             {
                 double ms = 1000.0 / Stopwatch.Frequency;
                 int f = Math.Max(1, frames);
-                Log.Info($"mirror tx: {txTiles} tiles, {txChunks} chunks, {txBytes / 1024} kB in {logClock.ElapsedMilliseconds} ms; {frames} frames, per frame capture {tCapture * ms / f:F0} ms, diff {tDiff * ms / f:F0} ms, encode {tEncode * ms / f:F0} ms, send {tSend * ms / f:F0} ms");
+                Log.Info($"mirror tx #{_id}: {txTiles} tiles, {txChunks} chunks, {txBytes / 1024} kB in {logClock.ElapsedMilliseconds} ms; {frames} frames, per frame capture {tCapture * ms / f:F0} ms, diff {tDiff * ms / f:F0} ms, encode {tEncode * ms / f:F0} ms, send {tSend * ms / f:F0} ms");
                 txTiles = txChunks = txBytes = frames = 0; tCapture = tDiff = tEncode = tSend = 0; logClock.Restart();
             }
 
             int spent = Environment.TickCount - t0;
             if (spent < interval) ct.WaitHandle.WaitOne(interval - spent);
         }
+        return false;
     }
 
-    private static void SendTile(ushort frameId, Rectangle region, bool full, byte[] jpeg, int chunkData, Action<Frame> send)
+    private static void SendTile(byte id, ushort frameId, Rectangle region, bool full, byte[] jpeg, int chunkData, Action<Frame> send)
     {
         int count = Math.Max(1, (jpeg.Length + chunkData - 1) / chunkData);
         for (int i = 0; i < count; i++)
         {
             int off = i * chunkData;
             int len = Math.Min(chunkData, jpeg.Length - off);
-            send(Frame.MirrorChunk(frameId, (ushort)i, (ushort)count, region.X, region.Y, region.Width, region.Height, full, jpeg.AsSpan(off, len)));
+            send(Frame.MirrorChunk(id, frameId, (ushort)i, (ushort)count, region.X, region.Y, region.Width, region.Height, full, jpeg.AsSpan(off, len)));
         }
     }
 }
