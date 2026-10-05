@@ -105,15 +105,26 @@ internal static class WindowCapture
     private const long WS_POPUP = 0x80000000;
 
     /// <summary>The visible popup windows of the window's process (menus, drop-downs, tooltips, dialogs: WS_POPUP)
-    /// clipped to the rectangle r, screen coordinates; top-most first as EnumWindows lists them.</summary>
+    /// clipped to the rectangle r, screen coordinates; top-most first as EnumWindows lists them.
+    /// Only those above the window: a popup shows over its owner, and EnumWindows goes top to bottom, so the
+    /// search ends at the window itself. And never the shell's own surfaces: File Explorer's windows live in
+    /// explorer.exe beside the desktop and the taskbar, both WS_POPUP, and the desktop covering the whole screen
+    /// was copied from the screen over the mirror -- which, with the window hidden, showed whatever lay behind
+    /// it (2026-10-05).</summary>
     private static List<RECT> FindPopups(IntPtr hwnd, RECT r)
     {
         uint pid = ProcessId(hwnd);
         var popups = new List<RECT>();
+        var cls = new StringBuilder(64);
         EnumWindows((h, _) =>
         {
-            if (h == hwnd || !IsWindowVisible(h) || ProcessId(h) != pid) return true;
+            if (h == hwnd) return false;   // below this, nothing can be a popup over the window
+            if (!IsWindowVisible(h) || ProcessId(h) != pid) return true;
             if ((GetWindowLongPtr(h, GWL_STYLE).ToInt64() & WS_POPUP) == 0) return true;
+            if (DwmGetWindowAttributeInt(h, DWMWA_CLOAKED, out int cloaked, sizeof(int)) == 0 && cloaked != 0) return true;
+            cls.Clear();
+            GetClassNameW(h, cls, cls.Capacity);
+            if (ShellSurfaces.Contains(cls.ToString())) return true;
             if (!GetWindowRect(h, out var p)) return true;
             int left = Math.Max(p.Left, r.Left), top = Math.Max(p.Top, r.Top);
             int right = Math.Min(p.Right, r.Right), bottom = Math.Min(p.Bottom, r.Bottom);
@@ -124,6 +135,13 @@ internal static class WindowCapture
     }
 
     [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT rect, int size);
+    [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] private static extern int DwmGetWindowAttributeInt(IntPtr hwnd, int attr, out int value, int size);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassNameW(IntPtr hwnd, StringBuilder s, int max);
+    private const int DWMWA_CLOAKED = 14;
+
+    /// <summary>The desktop, its wallpaper layer and the taskbars: WS_POPUP windows of explorer.exe that are no
+    /// File Explorer window's popups.</summary>
+    private static readonly HashSet<string> ShellSurfaces = ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"];
 
     /// <summary>The window's visible frame in screen pixels - what the compositor shows and what
     /// Windows.Graphics.Capture delivers - without the invisible resize borders (7-8 px a side) that
