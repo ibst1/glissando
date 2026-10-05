@@ -143,7 +143,9 @@ a person swallowing their clicks. (A modifier alone, such as the Ctrl and Alt
 of Ctrl+Alt+J, does not count as typing.) Hovering over the mirror moves the
 source PC's cursor over the hidden window so that hover effects show; while
 the window is hidden that cursor is hidden too, and it comes back as soon as
-that PC's own mouse moves or the other PC's mouse crosses over to it. The trick is a layered window at 1/255
+that PC's own mouse moves or the other PC's mouse crosses over to it. While the
+other PC's mouse is over driving the source PC, the hidden window lets clicks
+through to whatever lies behind it, so it cannot catch them unseen. The trick is a layered window at 1/255
 opacity: the only way of hiding a window that still lets it take clicks and
 keys and become the foreground window, which the input replay needs (moving
 it off screen or DWM-cloaking it would break that). If Glissando is ever

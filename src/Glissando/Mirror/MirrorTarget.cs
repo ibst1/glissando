@@ -66,7 +66,7 @@ internal sealed class MirrorTarget
     private bool Place(int x, int y, bool raise)
     {
         if (!IsWindow(_hwnd)) return false;
-        if (raise) Raise();
+        if (raise) { WindowHider.SetClickThrough(false); Raise(); }
         // The cursor is moved here for hover to work in the mirror, but over a window hidden on this PC it is
         // a pointer wandering across nothing (2026-10-05): hide it too, as if it had moved over with the window.
         // It comes back when the window shows again (WindowHider) or this PC's own mouse moves (Session).
@@ -153,7 +153,7 @@ internal sealed class MirrorTarget
     private void Key(ushort vk, ushort scan, bool up, bool ext)
     {
         if (!IsWindow(_hwnd)) return;
-        if (!up) Raise();
+        if (!up) { WindowHider.SetClickThrough(false); Raise(); }
         var key = (vk, scan, ext);
         if (up) _keysDown.Remove(key); else _keysDown.Add(key);
         // The injector's rule: an injected held modifier sticks only to the very next key, so re-assert every

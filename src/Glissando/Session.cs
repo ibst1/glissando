@@ -94,6 +94,9 @@ public sealed class Session : IDisposable
         _mirrorSender = new Mirror.MirrorSender(hwnd, Enqueue, () => Volatile.Read(ref _queued), slowLink: !_channel.IsCentral, hide: _s.HideMirroredWindow,
             udpUp: () => UdpUp, sendUdp: SendUdp);
         _mirrorSender.Start();
+        // Started with the other PC's mouse over here (the tray menu clicked from there): that mouse goes on
+        // driving this PC, so the window it just hid must not catch its clicks.
+        if (_injector.Active) Mirror.WindowHider.SetClickThrough(true);
         Log.Info($"mirror: started for window {hwnd:X}");
         StateChanged?.Invoke();
     }
@@ -396,6 +399,7 @@ public sealed class Session : IDisposable
             // The other PC's mouse has come over: its cursor is the one shown here now, so a mirror's hiding of
             // it must end, or the user drives an invisible pointer (2026-10-05).
             if (_injector.Active) CursorHider.Restore(CursorHider.Mirror);
+            Mirror.WindowHider.SetClickThrough(_injector.Active);
             StateChanged?.Invoke();
         };
         _capture.LocalInputWhileControlled += () =>

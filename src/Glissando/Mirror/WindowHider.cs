@@ -19,6 +19,7 @@ internal static class WindowHider
 {
     private const int GWL_EXSTYLE = -20;
     private const long WS_EX_LAYERED = 0x80000;
+    private const long WS_EX_TRANSPARENT = 0x20;
     private const uint LWA_ALPHA = 0x2;
     private const byte HiddenAlpha = 1;
     private const uint SWP_NOSIZE = 0x1, SWP_NOMOVE = 0x2, SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_FRAMECHANGED = 0x20;
@@ -75,6 +76,26 @@ internal static class WindowHider
         }
     }
 
+    /// <summary>
+    /// Let clicks pass through the hidden window to whatever lies behind it, or stop them doing so. A click on
+    /// the mirror brings the source window to the front here; when the viewer's mouse then crosses over to
+    /// drive this PC, its clicks (injected, so they do not count as someone sitting here) landed on the
+    /// invisible window and nothing behind it could be clicked (2026-10-05). So it is click-through while this
+    /// PC is being controlled, and solid again whenever the mirror's own input has to reach it.
+    /// </summary>
+    public static void SetClickThrough(bool on)
+    {
+        lock (Gate)
+        {
+            if (_hwnd == IntPtr.Zero || !IsWindow(_hwnd)) return;
+            long ex = GetWindowLongPtr(_hwnd, GWL_EXSTYLE).ToInt64();
+            long want = on ? ex | WS_EX_TRANSPARENT : ex & ~WS_EX_TRANSPARENT;
+            if (want == ex) return;
+            SetWindowLongPtr(_hwnd, GWL_EXSTYLE, new IntPtr(want));
+            Log.Info($"mirror: hidden window {_hwnd:X} {(on ? "lets clicks through" : "takes clicks again")}");
+        }
+    }
+
     /// <summary>Show the hidden window again (no-op if none is hidden).</summary>
     public static void Unhide()
     {
@@ -95,11 +116,9 @@ internal static class WindowHider
     {
         if (!IsWindow(h)) return;
         SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
-        if ((originalExStyle & WS_EX_LAYERED) == 0)
-        {
-            long ex = GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64();
-            SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr(ex & ~WS_EX_LAYERED));
-        }
+        long cur = GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64();
+        long restored = cur & ~(WS_EX_LAYERED | WS_EX_TRANSPARENT) | originalExStyle & (WS_EX_LAYERED | WS_EX_TRANSPARENT);
+        if (restored != cur) SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr(restored));
         // Dropping WS_EX_LAYERED does not repaint by itself.
         SetWindowPos(h, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         RedrawWindow(h, IntPtr.Zero, IntPtr.Zero, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME);
