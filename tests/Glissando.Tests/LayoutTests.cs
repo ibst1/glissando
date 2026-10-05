@@ -211,3 +211,50 @@ public class LayoutTests
         Assert.Equal(new Point(2560, 500), p);
     }
 }
+
+public class DeskForMyScreensTests
+{
+    private static readonly MonitorRect[] Home =
+    [
+        new(new Rectangle(1920, 0, 3840, 2160), 2, "A"),
+        new(new Rectangle(5760, 0, 3840, 2160), 3, "B"),
+        new(new Rectangle(0, 1072, 1920, 1080), 4, "C"),
+        new(new Rectangle(3118, 2160, 1920, 1200), 1, "L"),
+    ];
+    private static readonly MonitorRect[] LaptopAlone = [new(new Rectangle(0, 0, 1920, 1200), 1, "L")];
+    private static readonly MonitorRect[] PeerLaptop = [new(new Rectangle(0, 0, 1920, 1200), 1, "R")];
+    private static readonly MonitorRect[] PeerOffice =
+    [
+        new(new Rectangle(0, 0, 1920, 1080), 2, "X"),
+        new(new Rectangle(1920, 16, 1920, 1080), 3, "Y"),
+        new(new Rectangle(0, 1080, 1920, 1200), 1, "R"),
+    ];
+
+    [Fact]
+    public void HomeScreens_FindTheHomeDesk_NotTheOfficeOneUsedLast()
+    {
+        string home = Layout.SetupKey(Home, "RS", PeerLaptop);
+        string office = Layout.SetupKey(LaptopAlone, "RS", PeerOffice);
+        var desks = new[] { (home, "Hemma", 1L), (office, "", 3L) };
+        Assert.Equal(home, Layout.DeskForMyScreens(desks, Home, "RS"));
+    }
+
+    [Fact]
+    public void SamePanelsMoved_StillFound_ExactArrangementPreferred()
+    {
+        var moved = Home.Select(m => m with { Bounds = m.Bounds with { X = m.Bounds.X + 10 } }).ToArray();
+        string exact = Layout.SetupKey(Home, "RS", PeerLaptop);
+        string other = Layout.SetupKey(moved, "RS", PeerOffice);
+        Assert.Equal(other, Layout.DeskForMyScreens([(other, "", 5L)], Home, "RS"));
+        Assert.Equal(exact, Layout.DeskForMyScreens([(other, "Named", 5L), (exact, "", 1L)], Home, "RS"));
+    }
+
+    [Fact]
+    public void UnknownScreensOrOtherPeer_Null()
+    {
+        string home = Layout.SetupKey(Home, "RS", PeerLaptop);
+        Assert.Null(Layout.DeskForMyScreens([(home, "", 1L)], LaptopAlone, "RS"));
+        Assert.Null(Layout.DeskForMyScreens([(home, "", 1L)], Home, "SOMEONE"));
+        Assert.Equal(home, Layout.DeskForMyScreens([(home, "", 1L)], Home, ""));   // before any hello this run
+    }
+}

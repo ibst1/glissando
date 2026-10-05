@@ -128,13 +128,26 @@ public sealed class Session : IDisposable
     /// in the placement remembered for it, or remember the current one for a setup seen for the first time.</summary>
     private void ReconcilePlacement(string why)
     {
-        var key = Layout.SetupKey(Layout.MyMonitors(), PeerName ?? "", _s.OtherMonitorList);
+        var mine = Layout.MyMonitors();
+        var key = Layout.SetupKey(mine, PeerName ?? "", _s.OtherMonitorList);
+        bool peerSwapped = false;
+        if (!Authenticated && !_s.Placements.ContainsKey(key))
+        {
+            // The other PC is not here to say what it has: go by this PC's screens (see DeskForMyScreens).
+            var desk = Layout.DeskForMyScreens(_s.Placements.Select(kv => (kv.Key, kv.Value.Name, kv.Value.Updated)), mine, PeerName ?? "");
+            if (desk != null && Layout.TryParseSetupKey(desk, out _, out _, out var peerThere))
+            {
+                peerSwapped = !peerThere.SequenceEqual(_s.OtherMonitorList);
+                _s.OtherMonitorList = peerThere;
+                key = desk;
+            }
+        }
         if (key == _setupKey) return;
         _setupKey = key;
         if (_s.RecallPlacement(key, out bool changed))
         {
             Log.Info($"screen setup ({why}): recalled placement, other PC at ({_s.PeerX},{_s.PeerY}){(changed ? "" : " (as now)")}");
-            if (!changed) return;
+            if (!changed && !peerSwapped) return;
             RebuildLayout();
             try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
             SettingsChanged?.Invoke();
@@ -158,7 +171,9 @@ public sealed class Session : IDisposable
                 SettingsChanged?.Invoke();
                 if (Linked) SendHello();
             }
-            else if (_s.PeerX != null)
+            // Remember a new desk only with the other PC linked: without it its monitor list is the last desk's,
+            // and the placement in use belongs to that desk too.
+            else if (_s.PeerX != null && Authenticated)
             {
                 _s.RememberPlacement(key);
                 try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }

@@ -334,14 +334,35 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
     {
         if (!TryParseSetupKey(a, out var am, out var an, out var ap) || !TryParseSetupKey(b, out var bm, out var bn, out var bp)) return false;
         return an == bn && SameSet(am, bm) && SameSet(ap, bp);
+    }
 
-        static bool SameSet(MonitorRect[] x, MonitorRect[] y)
-        {
-            if (x.Length != y.Length) return false;
-            bool ids = x.All(m => m.Id != "") && y.All(m => m.Id != "");
-            IEnumerable<string> Keys(MonitorRect[] r) => r.Select(m => ids ? m.Id : $"{m.Bounds.Width}x{m.Bounds.Height}").OrderBy(k => k, StringComparer.Ordinal);
-            return Keys(x).SequenceEqual(Keys(y));
-        }
+    private static bool SameSet(MonitorRect[] x, MonitorRect[] y)
+    {
+        if (x.Length != y.Length) return false;
+        bool ids = x.All(m => m.Id != "") && y.All(m => m.Id != "");
+        IEnumerable<string> Keys(MonitorRect[] r) => r.Select(m => ids ? m.Id : $"{m.Bounds.Width}x{m.Bounds.Height}").OrderBy(k => k, StringComparer.Ordinal);
+        return Keys(x).SequenceEqual(Keys(y));
+    }
+
+    /// <summary>
+    /// The remembered desk for this PC's screens while the other PC is not linked. Its monitor list is then
+    /// whatever it had at the last desk, so the full key points at a desk that is not this one: on 2026-10-05
+    /// LU came home to its four screens still holding RS's three office screens, found no such desk, and
+    /// carried the office placement home. This PC's own screens say which desk it is at; the other PC's side
+    /// comes from that desk until its hello brings the real one. This exact arrangement wins over the same
+    /// panels moved, a named desk over an unnamed one, then the most recently edited. Null when none matches.
+    /// </summary>
+    public static string? DeskForMyScreens(IEnumerable<(string Key, string Name, long Updated)> desks, MonitorRect[] mine, string peerName)
+    {
+        string sig = MonitorSignature(mine);
+        return desks
+            .Where(d => IsCompleteSetupKey(d.Key) && TryParseSetupKey(d.Key, out var m, out var n, out _)
+                        && (peerName == "" || n == peerName) && SameSet(m, mine))
+            .OrderByDescending(d => d.Key.Split('|')[0] == sig)
+            .ThenByDescending(d => d.Name != "")
+            .ThenByDescending(d => d.Updated)
+            .Select(d => d.Key)
+            .FirstOrDefault();
     }
 
     /// <summary>A setup key in words, for the settings dialog.</summary>
