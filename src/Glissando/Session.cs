@@ -111,7 +111,7 @@ public sealed class Session : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly byte[] _myNonce = new byte[16];
     private byte[]? _peerNonce; // the peer's last Hello nonce: a new one means a new Hello from it
-    private long _lastPeer, _lastSend, _lastHello;
+    private long _lastPeer, _lastSend, _lastHello, _lastMoveSend;
     private long _lastPong, _lastLivePing, _lastOneWayReconnect;   // is the peer HEARING us? see TimerLoop
     private int _pingsSincePong;
     private long _linkedSince;   // when the current link came up, for the stuck-handshake watchdog
@@ -826,6 +826,10 @@ public sealed class Session : IDisposable
                     Interlocked.Decrement(ref _queued);
                     if (f.Type == FrameType.MouseMove)
                     {
+                        // Hold the move until the pacing gap has passed; moves that arrive meanwhile join it below.
+                        double sinceMove = (Stopwatch.GetTimestamp() - _lastMoveSend) * 1000.0 / Stopwatch.Frequency;
+                        int wait = MovePacing.GapMs(RttMs) - (int)sinceMove;
+                        if (wait > 0) await Task.Delay(wait, _cts.Token);
                         int dx = f.I16(0), dy = f.I16(2);
                         while (reader.TryPeek(out var next) && next.Type == FrameType.MouseMove && reader.TryRead(out next))
                         {
@@ -834,6 +838,7 @@ public sealed class Session : IDisposable
                             dy += next.I16(2);
                         }
                         f = Frame.MouseMove(dx, dy);
+                        _lastMoveSend = Stopwatch.GetTimestamp();
                     }
                     var crypto = _crypto;
                     if (crypto == null || !_channel.IsLinked) continue;

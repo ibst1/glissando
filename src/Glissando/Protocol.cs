@@ -444,3 +444,22 @@ public sealed class Crypto : IDisposable
 
     public void Dispose() => _aes.Dispose();
 }
+
+/// <summary>
+/// How often mouse moves may go out. A BLE central's WriteWithoutResponse completes as soon as Windows has
+/// buffered the packet, not when the radio has sent it, so the send queue never looks backed up: a wired mouse
+/// reporting at 500-1000 Hz filled the stack's own buffer on 2026-10-05 and the round trip climbed to seconds,
+/// with the peer dropping moves that arrived too late for its replay window. Spacing moves out lets the ones
+/// that arrive in between coalesce into one; the gap widens when the measured round trip shows a backlog anyway.
+/// </summary>
+public static class MovePacing
+{
+    public const int BaseGapMs = 8;
+    public const int MaxGapMs = 40;
+
+    public static int GapMs(double rttMs)
+    {
+        if (rttMs < 60) return BaseGapMs;
+        return (int)Math.Clamp(rttMs / 4, BaseGapMs, MaxGapMs);
+    }
+}
