@@ -5,9 +5,14 @@ using System.Windows.Forms;
 
 namespace Glissando.Mirror;
 
-/// <summary>Destination side: a top-most window that shows the mirrored source window. A backing bitmap holds
-/// the whole source; each decoded region is blitted into it and the changed part repainted. All methods run on
-/// the UI thread (the receiver marshals to it).
+/// <summary>Destination side: a window that shows the mirrored source window. A backing bitmap holds the whole
+/// source; each decoded region is blitted into it and the changed part repainted. All methods run on the UI
+/// thread (the receiver marshals to it).
+///
+/// No title bar of its own -- the source window brings its own -- just a thin coloured frame (Settings, green
+/// like the tray icon) that says "this is a mirror". The frame is the window's handle: its top edge moves it,
+/// the other edges and the corners size it, a double-click on the top edge maximizes, and a right-click on it
+/// offers to close the mirror.
 ///
 /// It behaves like the window it mirrors: the picture is shown at 1:1, never scaled, and resizing this window
 /// resizes the source window to match (sent when the drag ends), so the program lays itself out again at the
@@ -36,12 +41,17 @@ internal sealed class MirrorWindow : Form
     public bool ClosedByUser { get; private set; }
 
     private readonly byte _id;
+    private readonly Func<Color> _frameColor;
 
-    public MirrorWindow(byte id)
+    /// <summary>The frame's thickness in pixels, a little more on a high-DPI screen.</summary>
+    private int B => Math.Max(4, DeviceDpi * 5 / 96);
+
+    public MirrorWindow(byte id, Func<Color> frameColor)
     {
         _id = id;
+        _frameColor = frameColor;
         Text = "Glissando mirror";
-        FormBorderStyle = FormBorderStyle.SizableToolWindow;
+        FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = true;
         StartPosition = FormStartPosition.Manual;
         BackColor = Color.Black;
@@ -63,9 +73,9 @@ internal sealed class MirrorWindow : Form
             old?.Dispose();
 
             var wa = Screen.FromControl(this).WorkingArea;
-            var fit = new Size(Math.Min(srcW, wa.Width - 80), Math.Min(srcH, wa.Height - 80));
+            var fit = new Size(Math.Min(srcW, wa.Width - 80 - 2 * B), Math.Min(srcH, wa.Height - 80 - 2 * B));
             _sizingByCode = true;
-            try { ClientSize = fit; } finally { _sizingByCode = false; }
+            try { ClientSize = new Size(fit.Width + 2 * B, fit.Height + 2 * B); } finally { _sizingByCode = false; }
             // A source bigger than this screen would show cropped at 1:1: ask it to take the size that fits.
             if (fit.Width < srcW || fit.Height < srcH) Input?.Invoke(Frame.MirrorResize(_id, fit.Width, fit.Height));
             // Several mirrors: each opens a little further down and right, not all on top of each other.
@@ -86,31 +96,40 @@ internal sealed class MirrorWindow : Form
         // landed at 96/120 of its size, a grid of shrunken tiles with black gutters (2026-09-11).
         using (var g = Graphics.FromImage(_backing))
             g.DrawImage(region, new Rectangle(at, region.Size), new Rectangle(Point.Empty, region.Size), GraphicsUnit.Pixel);
-        // Repaint the touched area; the picture is shown at 1:1.
-        Invalidate(new Rectangle(at, region.Size));
+        // Repaint the touched area; the picture is shown at 1:1, inside the frame.
+        Invalidate(new Rectangle(at.X + B, at.Y + B, region.Width, region.Height));
     }
 
     protected override void OnPaint(PaintEventArgs e)
     {
-        if (_backing == null) { base.OnPaint(e); return; }
-        // 1:1 from the top-left corner. Where this window is bigger than the picture (the source has not caught
-        // up with a resize yet, or will not go that big), the rest is black.
-        var pic = new Rectangle(0, 0, _backing.Width, _backing.Height);
-        e.Graphics.DrawImage(_backing, pic, pic, GraphicsUnit.Pixel);
-        using var black = new Region(new Rectangle(Point.Empty, ClientSize));
+        var all = new Rectangle(Point.Empty, ClientSize);
+        var inner = Inner;
+        using (var frame = new Region(all))
+        {
+            frame.Exclude(inner);
+            using var brush = new SolidBrush(_frameColor());
+            e.Graphics.FillRegion(brush, frame);
+        }
+        if (_backing == null) { e.Graphics.FillRectangle(Brushes.Black, inner); return; }
+        // 1:1 from the frame's inner corner. Where the window is bigger than the picture (the source has not
+        // caught up with a resize yet, or will not go that big), the rest is black.
+        e.Graphics.SetClip(inner);
+        var pic = new Rectangle(B, B, _backing.Width, _backing.Height);
+        e.Graphics.DrawImage(_backing, pic, new Rectangle(0, 0, _backing.Width, _backing.Height), GraphicsUnit.Pixel);
+        using var black = new Region(inner);
         black.Exclude(pic);
         e.Graphics.FillRegion(Brushes.Black, black);
     }
 
-    protected override void OnPaintBackground(PaintEventArgs e)
-    {
-        if (_backing == null) base.OnPaintBackground(e); // avoid a black flash over the image
-    }
+    protected override void OnPaintBackground(PaintEventArgs e) { }   // OnPaint covers every pixel; no flash
+
+    /// <summary>The picture's area: the client area inside the frame.</summary>
+    private Rectangle Inner => new(B, B, Math.Max(0, ClientSize.Width - 2 * B), Math.Max(0, ClientSize.Height - 2 * B));
 
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        Invalidate();
+        Invalidate();   // the frame moves with the edges
         // Maximize, restore, Win+arrow snapping: no drag to wait for, the new size is final.
         if (!_sizing && !_sizingByCode && WindowState != FormWindowState.Minimized) RequestSourceSize();
     }
@@ -126,9 +145,10 @@ internal sealed class MirrorWindow : Form
 
     private void RequestSourceSize()
     {
-        if (_backing == null || ClientSize.Width < 50 || ClientSize.Height < 50) return;
-        if (ClientSize == _backing.Size) return;
-        Input?.Invoke(Frame.MirrorResize(_id, ClientSize.Width, ClientSize.Height));
+        var inner = Inner.Size;
+        if (_backing == null || inner.Width < 50 || inner.Height < 50) return;
+        if (inner == _backing.Size) return;
+        Input?.Invoke(Frame.MirrorResize(_id, inner.Width, inner.Height));
     }
 
     /// <summary>The mirror ended on the source: close without asking it to stop.</summary>
@@ -138,7 +158,7 @@ internal sealed class MirrorWindow : Form
     {
         base.OnFormClosing(e);
         if (_closingForMirror || e.Cancel) return;
-        // Closed here (the X, Alt+F4, Windows shutting down): tell the source to stop this mirror, or its next
+        // Closed here (the frame's menu, Windows shutting down): tell the source to stop this mirror, or its next
         // tile opens the window again (it did until 2026-10-05).
         ClosedByUser = true;
         Input?.Invoke(Frame.MirrorStop(_id));
@@ -146,11 +166,49 @@ internal sealed class MirrorWindow : Form
 
     // ---- interaction: viewer -> source ----
 
-    /// <summary>A client point in source-window pixels (1:1), or null before the first frame or off the picture.</summary>
+    /// <summary>A client point in source-window pixels (1:1 inside the frame), or null before the first frame
+    /// or off the picture.</summary>
     private Point? ToSource(Point client)
     {
-        if (_backing == null || client.X < 0 || client.Y < 0 || client.X >= _backing.Width || client.Y >= _backing.Height) return null;
-        return client;
+        if (_backing == null || !Inner.Contains(client)) return null;
+        var p = new Point(client.X - B, client.Y - B);
+        return p.X < _backing.Width && p.Y < _backing.Height ? p : null;
+    }
+
+    // ---- the frame: move, size, close ----
+
+    private const int WM_NCHITTEST = 0x84, WM_NCRBUTTONUP = 0xA5, WM_NCLBUTTONDBLCLK = 0xA3;
+    private const int HTCLIENT = 1, HTCAPTION = 2, HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13, HTTOPRIGHT = 14,
+        HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+
+    /// <summary>What a point of the window is for: inside the frame the picture, on the top edge moving (its
+    /// ends and the outer part of the corners size), on the other edges sizing.</summary>
+    private int HitTest(Point c)
+    {
+        int b = B, w = ClientSize.Width, h = ClientSize.Height, corner = Math.Max(3 * b, 16);
+        if (Inner.Contains(c)) return HTCLIENT;
+        bool left = c.X < corner, right = c.X >= w - corner, top = c.Y < corner, bottom = c.Y >= h - corner;
+        if (c.Y < b) return left ? HTTOPLEFT : right ? HTTOPRIGHT : HTCAPTION;
+        if (c.Y >= h - b) return left ? HTBOTTOMLEFT : right ? HTBOTTOMRIGHT : HTBOTTOM;
+        if (c.X < b) return top ? HTTOPLEFT : bottom ? HTBOTTOMLEFT : HTLEFT;
+        return top ? HTTOPRIGHT : bottom ? HTBOTTOMRIGHT : HTRIGHT;
+    }
+
+    private void ShowFrameMenu(Point screen)
+    {
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Close mirror", null, (_, _) => Close());
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        menu.Show(screen);
+    }
+
+    private void ToggleMaximize()
+    {
+        if (WindowState == FormWindowState.Maximized) { WindowState = FormWindowState.Normal; return; }
+        // A window without a border would cover the taskbar when maximized: keep to the working area.
+        var scr = Screen.FromControl(this);
+        MaximizedBounds = new Rectangle(scr.WorkingArea.X - scr.Bounds.X, scr.WorkingArea.Y - scr.Bounds.Y, scr.WorkingArea.Width, scr.WorkingArea.Height);
+        WindowState = FormWindowState.Maximized;
     }
 
     private static byte ButtonCode(MouseButtons b) => b switch
@@ -217,6 +275,22 @@ internal sealed class MirrorWindow : Form
                 Input?.Invoke(Frame.MirrorKey(_id, vk, scan, up, ext));
                 return; // swallowed here: the key is for the source window, not for this form
             }
+            case WM_NCHITTEST:
+            {
+                long lp = m.LParam.ToInt64();
+                var c = PointToClient(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+                m.Result = (IntPtr)HitTest(c);
+                return;
+            }
+            case WM_NCRBUTTONUP:
+            {
+                long lp = m.LParam.ToInt64();
+                ShowFrameMenu(new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF)));
+                return;
+            }
+            case WM_NCLBUTTONDBLCLK when (int)m.WParam == HTCAPTION:
+                ToggleMaximize();
+                return;
             case WM_MOUSEHWHEEL:
             {
                 int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);

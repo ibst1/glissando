@@ -289,6 +289,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
                 {
                     Ui = a => { try { _window.BeginInvoke(a); } catch (Exception ex) { Log.Warn("mirror ui: " + ex.Message); } },
                     Send = _session.SendMirrorInput,
+                    FrameColor = () => _settings.MirrorFrame,
                 };
                 _mirrorRx[id] = rx;
             }
@@ -395,6 +396,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _settings.HideMirroredWindow = working.HideMirroredWindow;   // these two were never copied: the boxes looked dead
         _settings.PowerSaveWhenIdle = working.PowerSaveWhenIdle;
         _settings.UdpMirror = working.UdpMirror;
+        _settings.MirrorFrameColor = working.MirrorFrameColor;
         _settings.Placements = working.Placements;
         try { _settings.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
         Log.Info($"settings saved: ble={_settings.Ble} peer origin=({_settings.PeerX},{_settings.PeerY}) capture={_settings.CaptureEnabled}");

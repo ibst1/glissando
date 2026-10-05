@@ -70,6 +70,21 @@ public sealed class Settings
     /// control path and carries the pixels itself when this is off or the network does not connect.</summary>
     public bool UdpMirror { get; set; } = true;
 
+    /// <summary>The colour of the frame drawn round a window mirrored to this PC, as #RRGGBB. Green like the
+    /// tray icon by default.</summary>
+    public string MirrorFrameColor { get; set; } = "#4CAF50";
+
+    [JsonIgnore]
+    public Color MirrorFrame
+    {
+        get
+        {
+            try { return ColorTranslator.FromHtml(MirrorFrameColor); }
+            catch (Exception) { return Color.FromArgb(76, 175, 80); }
+        }
+        set => MirrorFrameColor = $"#{value.R:X2}{value.G:X2}{value.B:X2}";
+    }
+
     /// <summary>Placements remembered per screen setup - this PC's monitors, the other PC's name and its monitors -
     /// so every desk (home, each office desk, the laptop on its own) comes back as it was left. Keyed by
     /// Layout.SetupKey; PeerX/PeerY hold the placement in use, which is the entry for the current key.</summary>

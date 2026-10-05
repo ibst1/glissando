@@ -204,6 +204,7 @@ internal sealed class SettingsForm : Form
     private readonly NumericUpDown _peerX = new() { Minimum = -30000, Maximum = 30000, Width = 80 };
     private readonly NumericUpDown _peerY = new() { Minimum = -30000, Maximum = 30000, Width = 80 };
     private readonly CheckBox _capture = new(), _clip = new(), _autostart = new(), _hideCursor = new(), _keysFollow = new(), _hideMirror = new(), _udpMirror = new(), _powerSave = new();
+    private readonly Button _frameColor = new() { AutoSize = false, Size = new Size(36, 20), FlatStyle = FlatStyle.Flat, Margin = new Padding(0, 2, 6, 0) };
     private readonly ComboBox _ble = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200 };
     private readonly Label _btInfo = new() { AutoSize = true, MaximumSize = new Size(460, 0) };
     private readonly Label _setupNow = new() { AutoSize = true, MaximumSize = new Size(460, 0) };
@@ -436,6 +437,16 @@ internal sealed class SettingsForm : Form
         _udpMirror.Checked = working.UdpMirror;
         layout.Controls.Add(Option(_hideMirror, "Hide a window on this PC while it is mirrored to the other PC. It becomes invisible here, as if it had moved over, and shows again when the mirror stops, when you click where it was, or when you type into it."));
         layout.Controls.Add(Option(_udpMirror, "Send the mirrored picture over the network when both PCs are on one (Wi-Fi/LAN): 25-30 frames a second instead of Bluetooth's few. Addresses are exchanged automatically; nothing to configure, no firewall rule. Falls back to Bluetooth by itself."));
+        _frameColor.BackColor = working.MirrorFrame;
+        _frameColor.Click += (_, _) =>
+        {
+            using var dlg = new ColorDialog { Color = _frameColor.BackColor, FullOpen = true };
+            if (dlg.ShowDialog(this) == DialogResult.OK) _frameColor.BackColor = dlg.Color;
+        };
+        var frameRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = new Padding(0, 1, 0, 3) };
+        frameRow.Controls.Add(_frameColor);
+        frameRow.Controls.Add(new Label { Text = "Colour of the frame round a window mirrored to this PC (move it by its top edge, size it by the others, right-click the frame to close)", AutoSize = true, MaximumSize = new Size(TextWidth - 48, 0), Margin = new Padding(0, 3, 0, 0) });
+        layout.Controls.Add(frameRow);
 
         layout.Controls.Add(Header("Power"));
         _powerSave.Checked = working.PowerSaveWhenIdle;
@@ -608,6 +619,7 @@ internal sealed class SettingsForm : Form
         _s.KeyboardFollowsCursor = _keysFollow.Checked;
         _s.HideMirroredWindow = _hideMirror.Checked;
         _s.UdpMirror = _udpMirror.Checked;
+        _s.MirrorFrame = _frameColor.BackColor;
         _s.PowerSaveWhenIdle = _powerSave.Checked;
         Settings.StartWithWindows = _autostart.Checked;
         Saved?.Invoke(_s);

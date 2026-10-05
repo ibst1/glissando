@@ -25,6 +25,9 @@ internal sealed class MirrorReceiver
     /// <summary>Where the mirror window's interactions go (the session sends them to the source PC).</summary>
     public Action<Frame>? Send { get; set; }
 
+    /// <summary>The colour of the frame round the mirror's window (read at every paint, so a change shows at once).</summary>
+    public Func<Color>? FrameColor { get; set; }
+
     /// <summary>Runs an action on the UI thread (set by the tray, which owns the message loop).</summary>
     public Action<Action>? Ui { get; set; }
 
@@ -163,7 +166,7 @@ internal sealed class MirrorReceiver
     {
         if (_window == null || _window.IsDisposed)
         {
-            _window = new MirrorWindow(_id);
+            _window = new MirrorWindow(_id, () => FrameColor?.Invoke() ?? Color.FromArgb(76, 175, 80));
             _window.Input = f => Send?.Invoke(f);
             _window.FormClosed += (_, _) =>
             {
