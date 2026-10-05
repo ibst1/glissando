@@ -31,6 +31,7 @@ internal static class WindowHider
 
     private static readonly object Gate = new();
     private static readonly Dictionary<IntPtr, long> Hidden = [];   // hidden window -> its original extended style
+    private static readonly Dictionary<IntPtr, long> HiddenPopups = []; // a hidden window's popups (menus), likewise
 
     /// <summary>True while the given window is one made invisible.</summary>
     public static bool IsHidden(IntPtr hwnd) { lock (Gate) return Hidden.ContainsKey(hwnd); }
@@ -45,8 +46,9 @@ internal static class WindowHider
     {
         try
         {
-            if (Hidden.Count == 0) File.Delete(MarkerPath);
-            else File.WriteAllLines(MarkerPath, Hidden.Select(kv => $"{kv.Key.ToInt64()} {kv.Value}"));
+            var all = Hidden.Concat(HiddenPopups).ToArray();
+            if (all.Length == 0) File.Delete(MarkerPath);
+            else File.WriteAllLines(MarkerPath, all.Select(kv => $"{kv.Key.ToInt64()} {kv.Value}"));
         }
         catch (Exception e) { Log.Warn("hidden-window marker: " + e.Message); }
     }
@@ -155,6 +157,57 @@ internal static class WindowHider
         return IntPtr.Zero;
     }
 
+    /// <summary>
+    /// Hide a popup (a menu, a drop-down) of a hidden window the same way, so a right-click menu opened through
+    /// the mirror shows on the other PC only. False if it cannot be hidden: one already layered per pixel. Menu
+    /// windows are reused by Windows, so each is shown again as soon as it closes (ReleaseGonePopups).
+    /// </summary>
+    public static bool HidePopup(IntPtr h)
+    {
+        lock (Gate)
+        {
+            if (HiddenPopups.ContainsKey(h)) return true;
+            if (!IsWindow(h)) return false;
+            long ex = GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64();
+            bool wasLayered = (ex & WS_EX_LAYERED) != 0;
+            if (wasLayered && !GetLayeredWindowAttributes(h, out _, out _, out _)) return false;
+            if (!wasLayered)
+            {
+                SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr(ex | WS_EX_LAYERED));
+                if ((GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64() & WS_EX_LAYERED) == 0) return false;
+            }
+            if (!SetLayeredWindowAttributes(h, 0, HiddenAlpha, LWA_ALPHA))
+            {
+                if (!wasLayered) SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr(ex));
+                return false;
+            }
+            HiddenPopups[h] = ex;
+            WriteMarker();   // a menu left invisible by a crash would stay so in its program until it restarted
+            return true;
+        }
+    }
+
+    /// <summary>Show again every hidden popup that has closed (or all of them), so a reused menu window is never
+    /// invisible to someone using this PC.</summary>
+    public static void ReleaseGonePopups(bool all = false)
+    {
+        lock (Gate)
+        {
+            bool changed = false;
+            foreach (var (h, ex) in HiddenPopups.ToArray())
+            {
+                if (!all && IsWindow(h) && IsWindowVisible(h)) continue;
+                HiddenPopups.Remove(h);
+                changed = true;
+                if (!IsWindow(h)) continue;
+                SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
+                if ((ex & WS_EX_LAYERED) == 0)
+                    SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr(GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64() & ~WS_EX_LAYERED));
+            }
+            if (changed) WriteMarker();
+        }
+    }
+
     /// <summary>Show this window again (no-op if it is not hidden).</summary>
     public static void Unhide(IntPtr hwnd)
     {
@@ -180,8 +233,10 @@ internal static class WindowHider
 
     private static void AfterUnhideLocked()
     {
-        // The cursor is hidden for the mirrors only while there is a hidden window to drive it over.
+        // The cursor is hidden for the mirrors only while there is a hidden window to drive it over; popups are
+        // shown again at once (any still open over another hidden window are hidden again on its next frame).
         if (Hidden.Count == 0) Host.CursorHider.Restore(Host.CursorHider.Mirror);
+        ReleaseGonePopups(all: true);
         WriteMarker();
     }
 

@@ -169,7 +169,7 @@ internal sealed class MirrorSender
                     if (_gpu.Closed || WindowCapture.SizeOf(_hwnd) == null) { Log.Info("mirror: source window gone"); WindowHider.Unhide(_hwnd); return true; }
                     var buf = spare;
                     fresh = _gpu.TryGetFrame(ref buf, interval, out w, out h, out stride);
-                    if (fresh) { cur = buf!; spare = prev; WindowCapture.OverlayPopupsOnto(cur, stride, w, h, _hwnd); }
+                    if (fresh) { cur = buf!; spare = prev; WindowCapture.OverlayPopupsOnto(cur, stride, w, h, _hwnd, hidden); }
                     else if (prev != null) { cur = prev; w = prevW; h = prevH; stride = prevStride; }
                     else continue;
                     mode = "gpu";

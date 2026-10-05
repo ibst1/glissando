@@ -93,7 +93,7 @@ internal static class WindowCapture
                 if (!done)
                 {
                     PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
-                    if (hidden) OverlayPopups(hwnd, hdc, r);
+                    if (hidden) { WindowHider.ReleaseGonePopups(); OverlayPopups(hwnd, hdc, r, hidden: true); }
                 }
             }
             finally { g.ReleaseHdc(hdc); }
@@ -111,10 +111,10 @@ internal static class WindowCapture
     /// explorer.exe beside the desktop and the taskbar, both WS_POPUP, and the desktop covering the whole screen
     /// was copied from the screen over the mirror -- which, with the window hidden, showed whatever lay behind
     /// it (2026-10-05).</summary>
-    private static List<RECT> FindPopups(IntPtr hwnd, RECT r)
+    private static List<(IntPtr h, RECT clip, RECT full)> FindPopups(IntPtr hwnd, RECT r)
     {
         uint pid = ProcessId(hwnd);
-        var popups = new List<RECT>();
+        var popups = new List<(IntPtr, RECT, RECT)>();
         var cls = new StringBuilder(64);
         EnumWindows((h, _) =>
         {
@@ -128,7 +128,7 @@ internal static class WindowCapture
             if (!GetWindowRect(h, out var p)) return true;
             int left = Math.Max(p.Left, r.Left), top = Math.Max(p.Top, r.Top);
             int right = Math.Min(p.Right, r.Right), bottom = Math.Min(p.Bottom, r.Bottom);
-            if (right > left && bottom > top) popups.Add(new RECT { Left = left, Top = top, Right = right, Bottom = bottom });
+            if (right > left && bottom > top) popups.Add((h, new RECT { Left = left, Top = top, Right = right, Bottom = bottom }, p));
             return true;
         }, IntPtr.Zero);
         return popups;
@@ -154,10 +154,12 @@ internal static class WindowCapture
         return GetWindowRect(hwnd, out var w) ? Rectangle.FromLTRB(w.Left, w.Top, w.Right, w.Bottom) : Rectangle.Empty;
     }
 
-    /// <summary>Copy the app's popups from the screen onto a 32bpp buffer holding the window's visible bounds
-    /// (a GPU-captured frame, which has only the window's own surface). False when there are none.</summary>
-    public static bool OverlayPopupsOnto(byte[] pixels, int stride, int w, int h, IntPtr hwnd)
+    /// <summary>Copy the app's popups onto a 32bpp buffer holding the window's visible bounds (a GPU-captured
+    /// frame, which has only the window's own surface). False when there are none.</summary>
+    /// <param name="hidden">The window is hidden on this PC: its popups are hidden too (see OverlayPopups).</param>
+    public static bool OverlayPopupsOnto(byte[] pixels, int stride, int w, int h, IntPtr hwnd, bool hidden)
     {
+        WindowHider.ReleaseGonePopups();
         var vb = VisibleBounds(hwnd);
         if (vb.IsEmpty) return false;
         var r = new RECT { Left = vb.Left, Top = vb.Top, Right = vb.Left + w, Bottom = vb.Top + h };
@@ -168,16 +170,20 @@ internal static class WindowCapture
             using var bmp = new Bitmap(w, h, stride, PixelFormat.Format32bppArgb, handle.AddrOfPinnedObject());
             using var g = Graphics.FromImage(bmp);
             IntPtr hdc = g.GetHdc();
-            try { OverlayPopups(hwnd, hdc, r); } finally { g.ReleaseHdc(hdc); }
+            try { OverlayPopups(hwnd, hdc, r, hidden); } finally { g.ReleaseHdc(hdc); }
         }
         finally { handle.Free(); }
         return true;
     }
 
     /// <summary>Copy the process's visible popup windows (menus, drop-downs, tooltips, dialogs: WS_POPUP, above
-    /// their owner) that overlap the window rectangle from the screen onto the capture, bottom-most first so the
-    /// z-order holds. Only the part inside the window rectangle, which is all the capture covers.</summary>
-    private static void OverlayPopups(IntPtr hwnd, IntPtr hdc, RECT r)
+    /// their owner) that overlap the window rectangle onto the capture, bottom-most first so the z-order holds.
+    /// Only the part inside the window rectangle, which is all the capture covers.
+    /// Normally from the screen. But when the window is hidden on this PC its popups would still show here -- a
+    /// right-click menu opened through the mirror appeared on both PCs (2026-10-05) -- so they are hidden the
+    /// same way (WindowHider.HidePopup) and drawn with PrintWindow instead; a popup that cannot be hidden (one
+    /// layered per pixel) stays visible and comes from the screen as before.</summary>
+    private static void OverlayPopups(IntPtr hwnd, IntPtr hdc, RECT r, bool hidden)
     {
         var popups = FindPopups(hwnd, r);
         if (popups.Count == 0) return;
@@ -186,11 +192,30 @@ internal static class WindowCapture
         {
             for (int i = popups.Count - 1; i >= 0; i--) // EnumWindows lists top-most first
             {
-                var p = popups[i];
-                BitBlt(hdc, p.Left - r.Left, p.Top - r.Top, p.Right - p.Left, p.Bottom - p.Top, screen, p.Left, p.Top, SRCCOPY | CAPTUREBLT);
+                var (h, c, f) = popups[i];
+                int cw = c.Right - c.Left, ch = c.Bottom - c.Top;
+                if (hidden && WindowHider.HidePopup(h) && PrintPopup(h, f, hdc, c.Left - r.Left, c.Top - r.Top, c.Left - f.Left, c.Top - f.Top, cw, ch))
+                    continue;
+                BitBlt(hdc, c.Left - r.Left, c.Top - r.Top, cw, ch, screen, c.Left, c.Top, SRCCOPY | CAPTUREBLT);
             }
         }
         finally { ReleaseDC(IntPtr.Zero, screen); }
+    }
+
+    /// <summary>Draw part of a popup with PrintWindow (it may be invisible on the screen) onto hdc.</summary>
+    private static bool PrintPopup(IntPtr h, RECT full, IntPtr hdc, int dx, int dy, int sx, int sy, int w, int ht)
+    {
+        int fw = full.Right - full.Left, fh = full.Bottom - full.Top;
+        if (fw <= 0 || fh <= 0) return false;
+        using var pb = new Bitmap(fw, fh, PixelFormat.Format32bppArgb);
+        using var g = Graphics.FromImage(pb);
+        IntPtr phdc = g.GetHdc();
+        try
+        {
+            if (!PrintWindow(h, phdc, PW_RENDERFULLCONTENT)) return false;
+            return BitBlt(hdc, dx, dy, w, ht, phdc, sx, sy, SRCCOPY);
+        }
+        finally { g.ReleaseHdc(phdc); }
     }
 
     [DllImport("user32.dll")] private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
