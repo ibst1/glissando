@@ -393,6 +393,9 @@ public sealed class Session : IDisposable
         {
             _capture.BeingControlled = _injector.Active;
             if (_injector.Active) _capture.SuppressTakeBack(300); // ignore the cursor-placement settle
+            // The other PC's mouse has come over: its cursor is the one shown here now, so a mirror's hiding of
+            // it must end, or the user drives an invisible pointer (2026-10-05).
+            if (_injector.Active) CursorHider.Restore(CursorHider.Mirror);
             StateChanged?.Invoke();
         };
         _capture.LocalInputWhileControlled += () =>
@@ -948,7 +951,8 @@ public sealed class Session : IDisposable
 
                 // A mirror hides this PC's cursor while it drives it over the hidden window (MirrorTarget.Place);
                 // the moment this PC's own mouse moves, someone is here and needs to see where it is.
-                if (!_capture.Remote && now - _capture.LastLocalMouseTicks < Stopwatch.Frequency / 2) CursorHider.Restore(CursorHider.Mirror);
+                // So must the other PC's mouse driving this one (see the injector's StateChanged).
+                if (_injector.Active || (!_capture.Remote && now - _capture.LastLocalMouseTicks < Stopwatch.Frequency / 2)) CursorHider.Restore(CursorHider.Mirror);
 
                 // While controlling, tell the other PC so it stays active even when the mouse is still.
                 if (_capture.Remote) Enqueue(new Frame(FrameType.ControlAlive, []));
