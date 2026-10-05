@@ -87,6 +87,7 @@ internal static class WindowHider
         if (h == IntPtr.Zero) return;
         _hwnd = IntPtr.Zero;
         Restore(h, _originalExStyle);
+        Host.CursorHider.Restore(Host.CursorHider.Mirror);
         try { File.Delete(MarkerPath); } catch { }
     }
 

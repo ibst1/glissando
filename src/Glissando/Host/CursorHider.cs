@@ -6,18 +6,23 @@ namespace Glissando.Host;
 /// Hides the cursor on the controlling PC while the other PC is being driven. There is no per-process
 /// way to hide the cursor over other apps' windows without administrator rights, so the whole system
 /// cursor set is swapped for blank cursors and restored from the user's scheme afterwards.
+/// Two parts of Glissando may want it hidden at once -- controlling the other PC, and a mirror driving the
+/// cursor over a window hidden here -- so it stays blank until every owner has let go.
 /// </summary>
 internal static class CursorHider
 {
     // OCR_* ids: normal, ibeam, wait, cross, up, size nwse/nesw/we/ns/all, no, hand, appstarting
     private static readonly uint[] Ids = [32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650];
+    public const string Control = "control", Mirror = "mirror";
     private static bool _hidden;
+    private static readonly HashSet<string> Owners = [];
     private static readonly object Gate = new();
 
-    public static void Hide()
+    public static void Hide(string owner = Control)
     {
         lock (Gate)
         {
+            Owners.Add(owner);
             if (_hidden) return;
             foreach (var id in Ids)
             {
@@ -30,11 +35,26 @@ internal static class CursorHider
         }
     }
 
-    /// <summary>Reloads the user's cursor scheme. Safe to call any time, also when nothing was hidden.</summary>
-    public static void Restore()
+    /// <summary>This owner no longer needs the cursor hidden; the user's scheme comes back once no owner does.
+    /// Safe to call any time, also when nothing was hidden.</summary>
+    public static void Restore(string owner = Control)
     {
         lock (Gate)
         {
+            Owners.Remove(owner);
+            if (!_hidden || Owners.Count > 0) return;
+            SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
+            _hidden = false;
+            Log.Info("system cursors restored");
+        }
+    }
+
+    /// <summary>Reloads the user's cursor scheme whoever hid it: on exit, a crash, the session closing.</summary>
+    public static void RestoreAll()
+    {
+        lock (Gate)
+        {
+            Owners.Clear();
             if (!_hidden) return;
             SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
             _hidden = false;
@@ -53,6 +73,7 @@ internal static class CursorHider
         {
             SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
             _hidden = false;
+            Owners.Clear();
         }
     }
 

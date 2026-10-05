@@ -78,10 +78,10 @@ internal sealed class MirrorSender
 
     /// <summary>Someone clicked or typed on this PC: show the window here again, and keep mirroring it. An
     /// invisible foreground window would otherwise swallow their clicks.</summary>
-    public void Reveal()
+    public void Reveal(string why)
     {
         if (!Hidden) return;
-        Log.Info("mirror: local input on this PC; showing the mirrored window here again");
+        Log.Info($"mirror: local input on this PC ({why}); showing the mirrored window here again");
         WindowHider.Unhide();
     }
 

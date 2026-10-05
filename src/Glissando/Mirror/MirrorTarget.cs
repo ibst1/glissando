@@ -11,7 +11,8 @@ namespace Glissando.Mirror;
 /// before a click or key (see Raise: Windows will not hand a background process the foreground for the asking,
 /// so it attaches to the foreground thread's input queue first). The source screen shows the window while that
 /// happens; nobody is sitting at it, the user is at the viewer. Pointer moves alone never raise the window,
-/// they only place the cursor, so hover works once it is up.
+/// they only place the cursor, so hover works once it is up; while the window is hidden here the cursor is
+/// hidden with it.
 /// </summary>
 internal sealed class MirrorTarget
 {
@@ -66,6 +67,10 @@ internal sealed class MirrorTarget
     {
         if (!IsWindow(_hwnd)) return false;
         if (raise) Raise();
+        // The cursor is moved here for hover to work in the mirror, but over a window hidden on this PC it is
+        // a pointer wandering across nothing (2026-10-05): hide it too, as if it had moved over with the window.
+        // It comes back when the window shows again (WindowHider) or this PC's own mouse moves (Session).
+        if (WindowHider.IsHidden(_hwnd)) Host.CursorHider.Hide(Host.CursorHider.Mirror);
         if (UseVisibleBounds)
         {
             var vb = WindowCapture.VisibleBounds(_hwnd);

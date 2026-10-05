@@ -269,7 +269,9 @@ public sealed class InputCapture : IDisposable
                 // A real local keystroke while being controlled means the user wants this machine back -- unless
                 // the keyboard follows the cursor: then typing while the other PC's cursor is here is the point.
                 if (BeingControlled && TakeBackArmed && !KeyboardFollowsCursor) LocalInputWhileControlled?.Invoke();
-                LocalActivity?.Invoke(null);
+                // A modifier alone is not typing: the Ctrl and Alt of Ctrl+Alt+J, pressed to jump over to the other
+                // PC, revealed the mirrored window that still held the focus here (2026-10-05).
+                if (!Native.IsModifierVk(info.vkCode)) LocalActivity?.Invoke(null);
             }
             var tk = ((ushort)info.vkCode, (ushort)info.scanCode, ext);
             lock (_modeGate)

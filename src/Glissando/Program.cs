@@ -40,7 +40,7 @@ internal static class Program
                     // Hidden: blank the system cursors for two seconds and restore them, to check the mechanism.
                     Host.CursorHider.Hide();
                     Thread.Sleep(2000);
-                    Host.CursorHider.Restore();
+                    Host.CursorHider.RestoreAll();
                     return 0;
                 case "--settings": settingsPath = Next(args, ref i); break;
                 case "--ble": overrides["ble"] = Next(args, ref i); break;
@@ -89,8 +89,8 @@ internal static class Program
 
         // If the cursor set was swapped out while controlling the other PC, or a mirrored window was made
         // invisible, put them back no matter how we end.
-        AppDomain.CurrentDomain.ProcessExit += (_, _) => { Host.CursorHider.Restore(); Mirror.WindowHider.Unhide(); };
-        AppDomain.CurrentDomain.UnhandledException += (_, _) => { Host.CursorHider.Restore(); Mirror.WindowHider.Unhide(); };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => { Host.CursorHider.RestoreAll(); Mirror.WindowHider.Unhide(); };
+        AppDomain.CurrentDomain.UnhandledException += (_, _) => { Host.CursorHider.RestoreAll(); Mirror.WindowHider.Unhide(); };
 
         // "Glissando.exe --exit": stop the instance that runs, for when its tray icon is not there to click.
         if (exitOther)
@@ -146,7 +146,7 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Host.CursorHider.Restore();
+            Host.CursorHider.RestoreAll();
             Mirror.WindowHider.Unhide();
             Log.Error("fatal: " + ex);
             MessageBox.Show(ex.ToString(), "Glissando crashed", MessageBoxButtons.OK, MessageBoxIcon.Error);

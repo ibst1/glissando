@@ -380,7 +380,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             _capture.Dispose();
             // One exit took 44 s with nothing logged (2026-09-15); say how long the teardown took.
             Log.Info($"session closed in {sw.ElapsedMilliseconds} ms");
-            Host.CursorHider.Restore();
+            Host.CursorHider.RestoreAll();
             _tray.Visible = false;
             _tray.Dispose();
         }

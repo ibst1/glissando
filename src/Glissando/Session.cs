@@ -411,7 +411,7 @@ public sealed class Session : IDisposable
             if (_mirrorSender is not { Hidden: true } m) return;
             bool hit = at is Point p ? Mirror.WindowCapture.VisibleBounds(m.Hwnd).Contains(p) : Mirror.WindowCapture.Foreground() == m.Hwnd;
             if (!hit) return;
-            m.Reveal();
+            m.Reveal(at is Point q ? $"a click at ({q.X},{q.Y}) on the hidden window" : "a key typed while the hidden window had the focus");
             StateChanged?.Invoke();
         };
         _injector.InputWhileInactive += () =>
@@ -946,6 +946,10 @@ public sealed class Session : IDisposable
                     }
                 }
 
+                // A mirror hides this PC's cursor while it drives it over the hidden window (MirrorTarget.Place);
+                // the moment this PC's own mouse moves, someone is here and needs to see where it is.
+                if (!_capture.Remote && now - _capture.LastLocalMouseTicks < Stopwatch.Frequency / 2) CursorHider.Restore(CursorHider.Mirror);
+
                 // While controlling, tell the other PC so it stays active even when the mouse is still.
                 if (_capture.Remote) Enqueue(new Frame(FrameType.ControlAlive, []));
 
@@ -1137,7 +1141,7 @@ public sealed class Session : IDisposable
         // did next - so the frames never left. Drain it first, bounded: exiting must never hang on a dead link.
         if (Authenticated && _injector.Active) Send(new Frame(FrameType.Detached, []));
         _capture.Release();
-        CursorHider.Restore();
+        CursorHider.RestoreAll();
         _injector.Deactivate();
         SayGoodbye();
         DrainSendQueue(400);
