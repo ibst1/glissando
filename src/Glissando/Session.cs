@@ -521,6 +521,8 @@ public sealed class Session : IDisposable
         _linkedSince = Stopwatch.GetTimestamp();
         // A fresh connection restarts the reliable stream on both sides.
         ResetReliable();
+        // Without the link no mirror can drive the cursor here, so nothing may keep it hidden.
+        if (!up) CursorHider.Restore(CursorHider.Mirror);
         if (up)
         {
             var old = _crypto;
@@ -937,8 +939,13 @@ public sealed class Session : IDisposable
             while (!_cts.IsCancellationRequested)
             {
                 await Task.Delay(250, _cts.Token);
-                if (!_channel.IsLinked) continue;
+                // A mirror hides this PC's cursor while it drives it over the hidden window (MirrorTarget.Place);
+                // the moment this PC's own mouse moves, someone is here and needs to see where it is. So must the
+                // other PC's mouse driving this one (see the injector's StateChanged). Before the link check: with
+                // the link down the cursor stayed blank for minutes under a moving mouse (2026-10-05).
                 long now = Stopwatch.GetTimestamp();
+                if (_injector.Active || (!_capture.Remote && now - _capture.LastLocalMouseTicks < Stopwatch.Frequency / 2)) CursorHider.Restore(CursorHider.Mirror);
+                if (!_channel.IsLinked) continue;
                 double sinceSend = (now - _lastSend) * 1000.0 / Stopwatch.Frequency;
                 double sincePeer = (now - _lastPeer) * 1000.0 / Stopwatch.Frequency;
                 double sinceHello = (now - _lastHello) * 1000.0 / Stopwatch.Frequency;
@@ -1008,11 +1015,6 @@ public sealed class Session : IDisposable
                         _channel.Reconnect();
                     }
                 }
-
-                // A mirror hides this PC's cursor while it drives it over the hidden window (MirrorTarget.Place);
-                // the moment this PC's own mouse moves, someone is here and needs to see where it is.
-                // So must the other PC's mouse driving this one (see the injector's StateChanged).
-                if (_injector.Active || (!_capture.Remote && now - _capture.LastLocalMouseTicks < Stopwatch.Frequency / 2)) CursorHider.Restore(CursorHider.Mirror);
 
                 // While controlling, tell the other PC so it stays active even when the mouse is still.
                 if (_capture.Remote) Enqueue(new Frame(FrameType.ControlAlive, []));

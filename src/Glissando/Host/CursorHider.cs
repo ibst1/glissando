@@ -22,8 +22,12 @@ internal static class CursorHider
     {
         lock (Gate)
         {
-            Owners.Add(owner);
-            if (_hidden) return;
+            bool added = Owners.Add(owner);
+            if (_hidden)
+            {
+                if (added) Log.Info($"system cursors also kept hidden for: {owner}");
+                return;
+            }
             foreach (var id in Ids)
             {
                 var h = CreateBlankCursor();
@@ -31,7 +35,7 @@ internal static class CursorHider
                 if (!SetSystemCursor(h, id)) DestroyCursor(h); // on success the system owns the handle
             }
             _hidden = true;
-            Log.Info("system cursors hidden");
+            Log.Info($"system cursors hidden ({owner})");
         }
     }
 
@@ -41,11 +45,16 @@ internal static class CursorHider
     {
         lock (Gate)
         {
-            Owners.Remove(owner);
-            if (!_hidden || Owners.Count > 0) return;
+            bool removed = Owners.Remove(owner);
+            if (!_hidden) return;
+            if (Owners.Count > 0)
+            {
+                if (removed) Log.Info($"system cursors: {owner} lets go, still hidden for: {string.Join(", ", Owners)}");
+                return;
+            }
             SystemParametersInfo(SPI_SETCURSORS, 0, IntPtr.Zero, 0);
             _hidden = false;
-            Log.Info("system cursors restored");
+            Log.Info($"system cursors restored ({owner})");
         }
     }
 
