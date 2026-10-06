@@ -136,8 +136,10 @@ public sealed class BleAutoChannel : IChannel
                 {
                     var cur = p!;
                     Task run;
-                    try { run = cur.RunAsync(pToken); }
-                    catch (Exception ex) { run = Task.FromException(ex); }
+                    // On a task of its own: the stack can hang INSIDE a WinRT call (GattServiceProvider.CreateAsync
+                    // blocked synchronously on 2026-10-06), and called inline that took this watchdog down with it,
+                    // so the stuck start was never reported.
+                    run = Task.Run(() => cur.RunAsync(pToken));
                     var warned = false;
                     var startedAt = Stopwatch.StartNew();
                     while (true)
