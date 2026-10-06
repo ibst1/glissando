@@ -182,6 +182,17 @@ internal sealed class MirrorReceiver
 
     private void Reset() { _chunks = []; _have = 0; _frameId = 0; _count = 0; _painted = false; }
 
+    /// <summary>The source window's title, as the source last sent it.</summary>
+    public string Title { get { lock (_gate) return _title; } }
+
+    /// <summary>UI thread only. The user here wants this mirror gone: close its window, which asks the source to
+    /// stop; with no window open, ask directly.</summary>
+    public void StopFromViewer()
+    {
+        if (_window is { IsDisposed: false } w) w.Close();
+        else { _ended = true; Send?.Invoke(Frame.MirrorStop(_id)); }
+    }
+
     /// <summary>UI thread only. The mirror is over: its window closes for good.</summary>
     public void Close()
     {

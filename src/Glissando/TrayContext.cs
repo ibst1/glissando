@@ -241,23 +241,36 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             _tray.ShowBalloonTip(3000, "Glissando", $"\"{title}\" is already mirrored. Click another window first to mirror that one too.", ToolTipIcon.Info);
             return;
         }
-        _tray.ShowBalloonTip(4000, "Glissando", _session.MirrorHidden(h)
-            ? $"Mirroring \"{title}\" to the other PC. It is invisible here until the mirror stops, or until you click or type on this PC."
-            : $"Mirroring \"{title}\" to the other PC.", ToolTipIcon.Info);
+        // Name both PCs: a window titled "... - RS - Edge" on LU, mirrored from LU's tray by mistake, read as
+        // RS failing to hide its own window (2026-10-06).
+        string direction = $"from this PC ({Environment.MachineName}) to {PeerLabel}";
+        _tray.ShowBalloonTip(5000, "Glissando", _session.MirrorHidden(h)
+            ? $"Mirroring \"{title}\" {direction}. It is invisible here until the mirror stops, or until you click or type on this PC."
+            : $"Mirroring \"{title}\" {direction}.", ToolTipIcon.Info);
         UpdateTray();
     }
 
-    /// <summary>One "Stop mirroring" item per mirrored window, under the mirror item, plus "Stop all" for several.</summary>
+    private string PeerLabel => string.IsNullOrEmpty(_session.PeerName) ? "the other PC" : _session.PeerName;
+
+    private static string Short(string title, int max = 50) =>
+        (title == "" ? "(untitled)" : title.Length > max ? title[..(max - 3)] + "..." : title).Replace("&", "&&");
+
+    /// <summary>The mirror items, rebuilt each time the menu opens, each saying which way it goes: the one that
+    /// starts a mirror names the window and both PCs; one "Stop mirroring" per window this PC mirrors to the
+    /// other (plus "Stop all" for several); one "Close" per window the other PC mirrors to this one.</summary>
     private void RebuildMirrorStopItems()
     {
         foreach (var item in _mirrorStopItems) { _menu.Items.Remove(item); item.Dispose(); }
         _mirrorStopItems.Clear();
+        var h = _lastRealWindow;
+        _mirrorItem.Text = h != IntPtr.Zero && Mirror.WindowCapture.SizeOf(h) != null && !_session.IsMirroring(h)
+            ? $"Mirror \"{Short(Mirror.WindowCapture.Title(h), 40)}\" from this PC to {PeerLabel}"
+            : $"Mirror the active window from this PC to {PeerLabel}";
         var windows = _session.MirroredWindows;
         int at = _menu.Items.IndexOf(_mirrorItem) + 1;
         foreach (var (hwnd, title) in windows)
         {
-            string shown = title.Length > 60 ? title[..57] + "..." : title == "" ? $"window {hwnd:X}" : title;
-            var item = new ToolStripMenuItem($"Stop mirroring \"{shown.Replace("&", "&&")}\"");
+            var item = new ToolStripMenuItem($"Stop mirroring \"{Short(title)}\" (this PC \u2192 {PeerLabel})");
             item.Click += (_, _) => { _session.StopMirror(hwnd); UpdateTray(); };
             _mirrorStopItems.Add(item);
         }
@@ -266,6 +279,14 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             var all = new ToolStripMenuItem("Stop all mirrors");
             all.Click += (_, _) => { _session.StopAllMirrors(); UpdateTray(); };
             _mirrorStopItems.Add(all);
+        }
+        Mirror.MirrorReceiver[] incoming;
+        lock (_mirrorRx) incoming = [.. _mirrorRx.Values];
+        foreach (var rx in incoming)
+        {
+            var item = new ToolStripMenuItem($"Close mirror of \"{Short(rx.Title)}\" ({PeerLabel} \u2192 this PC)");
+            item.Click += (_, _) => rx.StopFromViewer();
+            _mirrorStopItems.Add(item);
         }
         foreach (var item in _mirrorStopItems) _menu.Items.Insert(at++, item);
     }
