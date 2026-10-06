@@ -56,6 +56,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private readonly Dictionary<byte, Mirror.MirrorReceiver> _mirrorRx = [];
     private readonly Dictionary<byte, long> _mirrorEnded = [];
     private readonly System.Windows.Forms.Timer _fgTimer = new() { Interval = 400 };
+    private readonly System.Threading.Timer _uiProbe;
     // The icon watchdog (see TrayIconProbe): checks at 2, 5, 10, 20, 40, 60 and 120 s after start.
     private readonly System.Windows.Forms.Timer _trayCheck = new();
     private static readonly int[] TrayCheckDelaysMs = [2000, 3000, 5000, 10000, 20000, 20000, 60000];
@@ -102,6 +103,23 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         // shell) window, since clicking the tray already moved focus.
         _fgTimer.Tick += (_, _) => TrackForeground();
         _fgTimer.Start();
+        // How promptly does this UI thread answer? It runs our low-level mouse and keyboard hooks, so a stall here
+        // stalls every key and move on this PC, injected ones included. Probed four times a second.
+        _uiProbe = new System.Threading.Timer(_ =>
+        {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            try
+            {
+                _window.BeginInvoke(() =>
+                {
+                    int ms = (int)((System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000 / System.Diagnostics.Stopwatch.Frequency);
+                    int cur;
+                    while (ms > (cur = Volatile.Read(ref Session.UiLagMaxMs)) && Interlocked.CompareExchange(ref Session.UiLagMaxMs, ms, cur) != cur) { }
+                    if (ms > 500) Log.Warn($"UI thread answered after {ms} ms (it runs the input hooks)");
+                });
+            }
+            catch { }
+        }, null, 1000, 250);
 
         _tray = new NotifyIcon { Icon = _iconIdle, Visible = true, Text = "Glissando", ContextMenuStrip = menu };
         _tray.DoubleClick += (_, _) => OpenSettings();

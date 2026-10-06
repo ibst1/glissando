@@ -166,6 +166,10 @@ public sealed class Session : IDisposable
     // The receiving side of the same question: how long does applying a frame take here (decrypting it and,
     // above all, SendInput, which waits on every low-level input hook on this PC)?
     private int _rxN, _rxSlow;
+
+    /// <summary>Longest wait for the UI thread (which runs our own low-level hooks) since the last stats line;
+    /// measured by the tray.</summary>
+    public static int UiLagMaxMs;
     private double _rxMs, _rxMaxMs;
     private bool _noAuthExplained;
     private long _lastPong, _lastLivePing, _lastOneWayReconnect;   // is the peer HEARING us? see TimerLoop
@@ -1012,8 +1016,10 @@ public sealed class Session : IDisposable
                     {
                         int n = _stMoves + _stKeys + _stOther;
                         double secs = (now - _stSince) / (double)Stopwatch.Frequency;
+                        var (calls, sendAvg, sendMax) = Native.TakeSendStats();
                         if (_injector.Active && _rxN > 0)
-                            Log.Info($"rx while controlled: {_rxN / secs:F0} frames/s; applying {_rxMs / _rxN:F1} ms avg, {_rxMaxMs:F0} ms max, {_rxSlow} over 50 ms; rtt {RttMs:F0}");
+                            Log.Info($"rx while controlled: {_rxN / secs:F0} frames/s; applying {_rxMs / _rxN:F1} ms avg, {_rxMaxMs:F0} ms max, {_rxSlow} over 50 ms; SendInput {calls}x {sendAvg:F1} ms avg {sendMax:F0} ms max; UI thread lag max {Volatile.Read(ref UiLagMaxMs)} ms; rtt {RttMs:F0}");
+                        Interlocked.Exchange(ref UiLagMaxMs, 0);
                         _rxN = _rxSlow = 0; _rxMs = _rxMaxMs = 0;
                         if (_capture.Remote && n > 0)
                             Log.Info($"tx while controlling: {n / secs:F0} packets/s ({_stMoves} moves, {_stKeys} keys/buttons, {_stOther} other, {_stFailed} failed), {_stBytes / secs / 1024:F1} kB/s; send {_stSendMs / n:F1} ms avg, {_stMaxSendMs:F0} ms max; queue max {_stMaxQueued}; move gap {MovePacing.GapMs(RttMs)} ms at rtt {RttMs:F0}");

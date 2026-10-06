@@ -157,7 +157,27 @@ internal static class Native
     public static void Send(params INPUT[] inputs)
     {
         if (inputs.Length == 0) return;
+        long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+        double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        lock (SendStatsGate) { SendCalls++; SendMs += ms; if (ms > SendMaxMs) SendMaxMs = ms; }
+    }
+
+    // SendInput returns only once every low-level input hook on the PC has seen the event: a slow hook anywhere
+    // (another program's, or our own on a busy UI thread) makes injected input crawl (2026-10-06).
+    private static readonly object SendStatsGate = new();
+    private static int SendCalls;
+    private static double SendMs, SendMaxMs;
+
+    /// <summary>SendInput calls since the last read, their average and longest time; resets the counters.</summary>
+    public static (int calls, double avgMs, double maxMs) TakeSendStats()
+    {
+        lock (SendStatsGate)
+        {
+            var r = (SendCalls, SendCalls > 0 ? SendMs / SendCalls : 0, SendMaxMs);
+            SendCalls = 0; SendMs = 0; SendMaxMs = 0;
+            return r;
+        }
     }
 
     // --- cursor / screen ---------------------------------------------------
