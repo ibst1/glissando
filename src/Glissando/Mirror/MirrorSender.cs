@@ -161,6 +161,7 @@ internal sealed class MirrorSender
             {
                 long s0 = Stopwatch.GetTimestamp();
                 bool hidden = Hidden;
+                if (hidden) WindowHider.RelaxIfIdle(_hwnd, _target.ButtonsHeld);
                 byte[] cur; int w, h, stride; bool fresh; string mode;
                 if (_gpu != null)
                 {

@@ -146,15 +146,16 @@ source window closes.
 
 While it is mirrored, the window is invisible on the PC it lives on, as if it
 had moved over (an option, on by default). It keeps its taskbar button and
-Alt+Tab entry, and it shows again when the mirror stops or the moment someone
-clicks or types on that PC, so an invisible window can never sit in front of
-a person swallowing their clicks. (A modifier alone, such as the Ctrl and Alt
-of Ctrl+Alt+J, does not count as typing.) Hovering over the mirror moves the
+Alt+Tab entry, and it shows again when the mirror stops or when someone types
+into it on that PC (a modifier alone, such as the Ctrl and Alt of Ctrl+Alt+J,
+does not count). It never catches a click unseen: except while the mirror is
+driving it (and a second and a half after), the hidden window lets clicks
+through to whatever lies behind it, so clicking what you see on that PC just
+works and leaves the mirror alone. Hovering over the mirror moves the
 source PC's cursor over the hidden window so that hover effects show; while
 the window is hidden that cursor is hidden too, and it comes back as soon as
-that PC's own mouse moves or the other PC's mouse crosses over to it. While the
-other PC's mouse is over driving the source PC, the hidden window lets clicks
-through to whatever lies behind it, so it cannot catch them unseen; if it
+that PC's own mouse moves or the other PC's mouse crosses over to it. When the
+other PC's mouse crosses over to drive the source PC and the hidden window
 held the focus, the window behind it gets the focus instead, so typing does
 not vanish into it either. The trick is a layered window at 1/255
 opacity: the only way of hiding a window that still lets it take clicks and

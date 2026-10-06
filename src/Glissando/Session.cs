@@ -443,7 +443,7 @@ public sealed class Session : IDisposable
             // The other PC's mouse has come over: its cursor is the one shown here now, so a mirror's hiding of
             // it must end, or the user drives an invisible pointer (2026-10-05).
             if (_injector.Active) CursorHider.Restore(CursorHider.Mirror);
-            Mirror.WindowHider.SetClickThrough(_injector.Active);
+            if (_injector.Active) Mirror.WindowHider.SetClickThrough(true);   // otherwise RelaxIfIdle sees to it
             if (_injector.Active) Mirror.WindowHider.StepAside();
             StateChanged?.Invoke();
         };
@@ -463,7 +463,10 @@ public sealed class Session : IDisposable
             foreach (var m in Mirrors)
             {
                 if (!m.Hidden) continue;
-                bool hit = at is Point p ? Mirror.WindowCapture.VisibleBounds(m.Hwnd).Contains(p) : Mirror.WindowCapture.Foreground() == m.Hwnd;
+                // A click-through window cannot have caught the click: it went to what lies behind.
+                bool hit = at is Point p
+                    ? Mirror.WindowCapture.VisibleBounds(m.Hwnd).Contains(p) && !Mirror.WindowHider.IsClickThrough(m.Hwnd)
+                    : Mirror.WindowCapture.Foreground() == m.Hwnd;
                 if (!hit) continue;
                 m.Reveal(at is Point q ? $"a click at ({q.X},{q.Y}) on the hidden window" : "a key typed while the hidden window had the focus");
                 StateChanged?.Invoke();

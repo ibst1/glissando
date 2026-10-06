@@ -25,6 +25,9 @@ internal sealed class MirrorTarget
 
     public MirrorTarget(IntPtr hwnd) => _hwnd = hwnd;
 
+    /// <summary>A mouse button pressed through the mirror and not yet released (a drag in progress).</summary>
+    public bool ButtonsHeld { get { lock (_gate) return _buttonsDown.Count > 0; } }
+
     /// <summary>The picture the viewer sees is the window's VISIBLE frame (GPU capture), not GetWindowRect with
     /// its invisible borders, so a mirror pixel maps from the visible bounds' corner.</summary>
     public volatile bool UseVisibleBounds;
@@ -33,6 +36,7 @@ internal sealed class MirrorTarget
     {
         lock (_gate)
         {
+            if (f.Type is FrameType.MirrorPointer or FrameType.MirrorMouse or FrameType.MirrorKey) WindowHider.Driven(_hwnd);
             switch (f.Type)
             {
                 case FrameType.MirrorPointer:
@@ -69,7 +73,7 @@ internal sealed class MirrorTarget
     private bool Place(int x, int y, bool raise)
     {
         if (!IsWindow(_hwnd)) return false;
-        if (raise) { WindowHider.SetClickThrough(_hwnd, false); Raise(); }
+        if (raise) Raise();
         // The cursor is moved here for hover to work in the mirror, but over a window hidden on this PC it is
         // a pointer wandering across nothing (2026-10-05): hide it too, as if it had moved over with the window.
         // It comes back when the window shows again (WindowHider) or this PC's own mouse moves (Session).
@@ -180,7 +184,7 @@ internal sealed class MirrorTarget
     private void Key(ushort vk, ushort scan, bool up, bool ext)
     {
         if (!IsWindow(_hwnd)) return;
-        if (!up) { WindowHider.SetClickThrough(_hwnd, false); Raise(); }
+        if (!up) Raise();
         var key = (vk, scan, ext);
         if (up) _keysDown.Remove(key); else _keysDown.Add(key);
         // The injector's rule: an injected held modifier sticks only to the very next key, so re-assert every

@@ -32,6 +32,7 @@ internal static class WindowHider
     private static readonly object Gate = new();
     private static readonly Dictionary<IntPtr, long> Hidden = [];   // hidden window -> its original extended style
     private static readonly Dictionary<IntPtr, long> HiddenPopups = []; // a hidden window's popups (menus), likewise
+    private static readonly Dictionary<IntPtr, long> LastDriven = [];   // hidden window -> when the mirror last drove it
 
     /// <summary>True while the given window is one made invisible.</summary>
     public static bool IsHidden(IntPtr hwnd) { lock (Gate) return Hidden.ContainsKey(hwnd); }
@@ -89,6 +90,7 @@ internal static class WindowHider
             Hidden[hwnd] = ex;
             WriteMarker();
             Log.Info($"mirror: window {hwnd:X} hidden on this PC");
+            SetClickThroughLocked(hwnd, true);   // see Driven: clicks here go to what this PC's user can see
             return true;
         }
     }
@@ -105,7 +107,42 @@ internal static class WindowHider
         lock (Gate) foreach (var h in Hidden.Keys) SetClickThroughLocked(h, on);
     }
 
-    /// <summary>The same for one hidden window (a mirror about to click or type into it).</summary>
+    /// <summary>
+    /// The mirror is driving this hidden window (a pointer move, a click, a key from the viewer): it must take
+    /// the input, so it stops being click-through. Otherwise it IS click-through: a click by this PC's own mouse
+    /// where the invisible window lies went into it and brought it back into view (RS, 2026-10-06), when the
+    /// user only meant what they could see behind it. RelaxIfIdle makes it click-through again.
+    /// </summary>
+    public static void Driven(IntPtr hwnd)
+    {
+        lock (Gate)
+        {
+            if (!Hidden.ContainsKey(hwnd)) return;
+            LastDriven[hwnd] = Environment.TickCount64;
+            SetClickThroughLocked(hwnd, false);
+        }
+    }
+
+    /// <summary>A second and a half after the mirror last drove it, with no button held through the mirror, the
+    /// hidden window lets clicks through again. Called by the mirror's capture loop every frame.</summary>
+    public static void RelaxIfIdle(IntPtr hwnd, bool buttonsHeld)
+    {
+        lock (Gate)
+        {
+            if (!Hidden.ContainsKey(hwnd) || buttonsHeld) return;
+            if (LastDriven.TryGetValue(hwnd, out long at) && Environment.TickCount64 - at < 1500) return;
+            SetClickThroughLocked(hwnd, true);
+        }
+    }
+
+    /// <summary>True while this hidden window lets clicks through (a click here cannot have landed on it).</summary>
+    public static bool IsClickThrough(IntPtr hwnd)
+    {
+        lock (Gate)
+            return Hidden.ContainsKey(hwnd) && IsWindow(hwnd) && (GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64() & WS_EX_TRANSPARENT) != 0;
+    }
+
+    /// <summary>The same for one hidden window.</summary>
     public static void SetClickThrough(IntPtr hwnd, bool on)
     {
         lock (Gate) if (Hidden.ContainsKey(hwnd)) SetClickThroughLocked(hwnd, on);
@@ -214,6 +251,7 @@ internal static class WindowHider
         lock (Gate)
         {
             if (!Hidden.Remove(hwnd, out long ex)) return;
+            LastDriven.Remove(hwnd);
             Restore(hwnd, ex);
             AfterUnhideLocked();
         }
@@ -227,6 +265,7 @@ internal static class WindowHider
             if (Hidden.Count == 0) return;
             foreach (var (h, ex) in Hidden.ToArray()) Restore(h, ex);
             Hidden.Clear();
+            LastDriven.Clear();
             AfterUnhideLocked();
         }
     }
