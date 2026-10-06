@@ -155,6 +155,7 @@ public sealed class BleAutoChannel : IChannel
                             warned = true;
                             Log.Warn("BLE peripheral: still not advertising after 15 s (Bluetooth stack stuck? toggling Bluetooth off and on helps)");
                             StatusChanged?.Invoke("BLE error: advertising will not start (Bluetooth stuck?)");
+                            BleHealth.Report("advertising does not start");
                         }
                         if (startedAt.ElapsedMilliseconds > 45000)
                         {
@@ -285,7 +286,11 @@ public sealed class BleAutoChannel : IChannel
         var t = Task.Run(() => { try { p.Dispose(); } catch { } });
         _ = Task.WhenAny(t, Task.Delay(10000)).ContinueWith(w =>
         {
-            if (w.Result != t) Log.Warn("BLE peripheral: releasing the old GATT server hangs (Bluetooth stack stuck); carrying on without it");
+            if (w.Result != t)
+            {
+                Log.Warn("BLE peripheral: releasing the old GATT server hangs (Bluetooth stack stuck); carrying on without it");
+                BleHealth.Report("the old GATT server cannot be released");
+            }
         });
     }
 

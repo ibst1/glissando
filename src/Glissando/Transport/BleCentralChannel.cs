@@ -58,6 +58,7 @@ public sealed class BleCentralChannel : IChannel
                 // A GATT step that never answers: seen on a fresh connection right after the peer's own restart
                 // (52 s of silence until Windows dropped the link, 2026-09-15). Treat the link as stale below.
                 Log.Warn("BLE central: " + ex.Message + " - releasing the link so Windows drops it");
+                BleHealth.Report("a new link does not answer (" + ex.Message + ")");
                 _hung = true;
                 attempted = true;
             }

@@ -57,6 +57,11 @@ public sealed class Session : IDisposable
     /// <summary>The other PC pings slowly because it is idle; allow it more silence before declaring it lost.</summary>
     public bool PeerPowerSaving { get; private set; }
 
+    /// <summary>What the other PC last said about its own Bluetooth (kept after the link drops: that is when it
+    /// matters, the PC that cannot link is the one to fix), and when.</summary>
+    public Transport.BleHealth.Verdict PeerBluetooth { get; private set; }
+    private long _peerBluetoothAt;
+
     private bool _powerSaving;
     private int _detachPending;
     private long _lastDetachLog;
@@ -317,7 +322,8 @@ public sealed class Session : IDisposable
 
     private void SendStatus()
     {
-        byte flags = (byte)((LocalLocked ? 1 : 0) | (_powerSaving ? 2 : 0));
+        // bits 2-3: this PC's Bluetooth verdict (BleHealth), so the other PC can say which PC needs the cure
+        byte flags = (byte)((LocalLocked ? 1 : 0) | (_powerSaving ? 2 : 0) | ((int)Transport.BleHealth.Current << 2));
         Send(new Frame(FrameType.Status, [flags]));
     }
 
@@ -339,6 +345,7 @@ public sealed class Session : IDisposable
         sb.AppendLine($"Glissando {Program.VersionLong} on {Environment.MachineName}, {Environment.OSVersion}, {DateTime.Now:yyyy-MM-dd HH:mm:ss}; peer build: {(string.IsNullOrEmpty(PeerVersion) ? "unknown" : PeerVersion)}");
         sb.AppendLine($"Bluetooth: {adapterInfo}");
         sb.AppendLine($"Transport: {TransportStatus}; linked={Linked} role={(Linked ? (_channel.IsCentral ? "central" : "peripheral") : "-")} authenticated={Authenticated} peer='{PeerName}' rtt={RttMs:F0} ms");
+        sb.AppendLine($"Bluetooth health: this PC {Transport.BleHealth.Describe(Transport.BleHealth.Current)}{(Transport.BleHealth.LastSign != "" ? $" (last sign: {Transport.BleHealth.LastSign})" : "")}; {PeerName} {Transport.BleHealth.Describe(PeerBluetooth)}");
         sb.AppendLine($"State: controlling={Controlling} controlled={Controlled} keysForwarded={_capture.ForwardKeys} locked={Locked} sessionLocked={LocalLocked} peerLocked={PeerLocked} powerSaving={_powerSaving} peerPowerSaving={PeerPowerSaving} idle={Native.IdleMs() / 1000} s");
         sb.AppendLine($"Counters: movesForwarded={Interlocked.Read(ref _capture.MovesForwarded)} rejectedPackets={Rejected} queued={Volatile.Read(ref _queued)} dedupSeen={_dedupSeen.Count}");
         sb.AppendLine(_udp == null ? "UDP pixel path: off" : $"UDP pixel path: port {_udp.LocalPort} up={_udp.Up} peer={_udp.Peer?.ToString() ?? "-"} sent={_udp.SentBytes / 1024} kB received={_udp.ReceivedBytes / 1024} kB");
@@ -410,6 +417,7 @@ public sealed class Session : IDisposable
 
     public void Start()
     {
+        Transport.BleHealth.Changed += () => { if (Authenticated) SendStatus(); StateChanged?.Invoke(); };
         ReconcilePlacement("start");
         _channel.Received += OnReceived;
         _channel.LinkChanged += OnLinkChanged;
@@ -720,6 +728,10 @@ public sealed class Session : IDisposable
                     bool wasLocked = PeerLocked;
                     PeerLocked = (f.Payload[0] & 1) != 0;
                     PeerPowerSaving = (f.Payload[0] & 2) != 0;
+                    var peerBt = (Transport.BleHealth.Verdict)((f.Payload[0] >> 2) & 3);
+                    if (peerBt != PeerBluetooth) Log.Info($"{PeerName} says its Bluetooth: {Transport.BleHealth.Describe(peerBt)}");
+                    PeerBluetooth = peerBt;
+                    _peerBluetoothAt = Environment.TickCount64;
                     if (PeerLocked && !wasLocked)
                     {
                         Log.Info($"{PeerName} locked its session");
@@ -946,6 +958,8 @@ public sealed class Session : IDisposable
                 long now = Stopwatch.GetTimestamp();
                 if (_injector.Active || (!_capture.Remote && now - _capture.LastLocalMouseTicks < Stopwatch.Frequency / 2)) CursorHider.Restore(CursorHider.Mirror);
                 if (!_channel.IsLinked) continue;
+                // Ten minutes of an authenticated link: the stack is fine, whatever was reported before.
+                if (Authenticated && now - _linkedSince > Stopwatch.Frequency * 600) Transport.BleHealth.LinkHeld();
                 double sinceSend = (now - _lastSend) * 1000.0 / Stopwatch.Frequency;
                 double sincePeer = (now - _lastPeer) * 1000.0 / Stopwatch.Frequency;
                 double sinceHello = (now - _lastHello) * 1000.0 / Stopwatch.Frequency;
@@ -1171,6 +1185,24 @@ public sealed class Session : IDisposable
                 Log.Info($"clipboard received ({text.Length} chars)");
             }
             catch (Exception ex) { Log.Warn("clipboard write: " + ex.Message); }
+        }
+    }
+
+    /// <summary>A Bluetooth problem in words, for the tray: this PC's, or the other PC's as it last told us
+    /// (for half an hour). Empty when there is none.</summary>
+    public string BluetoothProblem
+    {
+        get
+        {
+            var mine = Transport.BleHealth.Current;
+            if (mine == Transport.BleHealth.Verdict.RestartWindows) return "Bluetooth on this PC is stuck: restart Windows on this PC";
+            if (mine == Transport.BleHealth.Verdict.ToggleBluetooth) return "Bluetooth on this PC is not responding: turn Bluetooth off and on";
+            string peer = PeerName != "" ? PeerName : "the other PC";
+            if (PeerBluetooth != Transport.BleHealth.Verdict.Fine && Environment.TickCount64 - _peerBluetoothAt < 30 * 60_000)
+                return PeerBluetooth == Transport.BleHealth.Verdict.RestartWindows
+                    ? $"Bluetooth on {peer} is stuck: restart Windows on {peer}"
+                    : $"Bluetooth on {peer} is not responding: turn Bluetooth off and on there";
+            return "";
         }
     }
 

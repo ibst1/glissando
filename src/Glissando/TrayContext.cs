@@ -47,6 +47,8 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private readonly Icon _iconIdle, _iconReady, _iconControlling, _iconControlled, _iconLocked, _iconError;
     private readonly ToolStripMenuItem _lockItem;
     private readonly ToolStripMenuItem _mirrorItem;
+    private readonly ToolStripMenuItem _bluetoothItem;
+    private string _bluetoothShown = "";
     private readonly ContextMenuStrip _menu;
     private readonly List<ToolStripItem> _mirrorStopItems = [];
     // Viewer side: one receiver (and window) per mirror id. An id just ended is ignored for a few seconds, so a
@@ -79,10 +81,13 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _lockItem.Click += (_, _) => _session?.SetLocked(_lockItem.Checked);
         _mirrorItem = new ToolStripMenuItem("Mirror the active window to the other PC");
         _mirrorItem.Click += (_, _) => StartMirror();
+        _bluetoothItem = new ToolStripMenuItem { Visible = false, ForeColor = Color.FromArgb(198, 40, 40), Font = new Font(SystemFonts.MenuFont ?? SystemFonts.DefaultFont, FontStyle.Bold) };
+        _bluetoothItem.Click += (_, _) => ShowBluetoothBalloon(_session.BluetoothProblem);
         var menu = _menu = new ContextMenuStrip();
         menu.Opening += (_, _) => RebuildMirrorStopItems();
         menu.Items.Add(new ToolStripMenuItem($"Glissando {Program.VersionLong}") { Enabled = false });
         menu.Items.Add(_status);
+        menu.Items.Add(_bluetoothItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_lockItem);
         menu.Items.Add(_mirrorItem);
@@ -155,7 +160,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         UpdateTray();
     }
 
-    private bool _versionWarned, _stuckWarned;
+    private bool _versionWarned;
 
     // ---- tray icon watchdog ----
 
@@ -338,14 +343,16 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             _tray.ShowBalloonTip(8000, "Glissando", $"The other PC runs another Glissando version. Install {Program.Version} there too.", ToolTipIcon.Warning);
         }
         if (_session.Authenticated) _versionWarned = false;
-        // The LE stack is stuck (advertising never starts): say what to do, once per episode.
-        bool stuck = _session.TransportStatus.Contains("advertising will not start");
-        if (stuck && !_stuckWarned)
+        // Bluetooth trouble on either PC (BleHealth): a red line at the top of the menu that says what to do,
+        // a red icon, and a balloon each time the advice changes.
+        string problem = _session.BluetoothProblem;
+        _bluetoothItem.Visible = problem != "";
+        _bluetoothItem.Text = problem;
+        if (problem != _bluetoothShown)
         {
-            _stuckWarned = true;
-            _tray.ShowBalloonTip(15000, "Glissando", "Windows' Bluetooth LE stack is stuck - it happens after sleep. Turn Bluetooth off and on; if the link is not back within a minute, restart Windows.", ToolTipIcon.Warning);
+            _bluetoothShown = problem;
+            if (problem != "") ShowBluetoothBalloon(problem);
         }
-        if (_session.Linked) _stuckWarned = false;
         // Windows truncates a long tray tooltip on hover, so the tip is a short summary; the full multi-line
         // status lives in the first menu row (_status.Text above), which has no such limit.
         // Build id first so it survives the 63-char trim; the live status fills the rest.
@@ -360,13 +367,22 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             string locked = _session.Locked ? ", locked" : "";
             tip += $": {role}{peer}{rtt}{locked}";
         }
-        _tray.Text = Trim(tip, 63);
-        _tray.Icon = _session.TransportStatus.StartsWith("BLE error") ? _iconError
+        _tray.Text = problem != "" ? Trim(tip, 40) + " - BLUETOOTH STUCK" : Trim(tip, 63);
+        _tray.Icon = _session.TransportStatus.StartsWith("BLE error") || problem != "" ? _iconError
             : _session.Controlling ? _iconControlling
             : _session.Controlled ? _iconControlled
             : _session.Locked ? _iconLocked
             : _session.Authenticated ? _iconReady
             : _iconIdle;
+    }
+
+    private void ShowBluetoothBalloon(string problem)
+    {
+        if (problem == "") return;
+        string detail = problem.Contains("restart Windows")
+            ? "Windows' Bluetooth has been stuck for minutes; turning it off and on does not cure this. Glissando reconnects by itself after the restart."
+            : "Windows' Bluetooth stopped answering (it happens after sleep). Turn it off and on in Settings > Bluetooth & devices; Glissando reconnects by itself. If it keeps happening, restart Windows.";
+        _tray.ShowBalloonTip(20000, "Glissando: " + problem, detail, ToolTipIcon.Warning);
     }
 
     private static string Trim(string s, int max) => s.Length <= max ? s : s[..(max - 3)] + "...";
