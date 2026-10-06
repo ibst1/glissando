@@ -163,6 +163,10 @@ public sealed class Session : IDisposable
     private int _stMoves, _stKeys, _stOther, _stFailed, _stMaxQueued, _stBytes;
     private double _stSendMs, _stMaxSendMs;
     private long _stSince = Stopwatch.GetTimestamp();
+    // The receiving side of the same question: how long does applying a frame take here (decrypting it and,
+    // above all, SendInput, which waits on every low-level input hook on this PC)?
+    private int _rxN, _rxSlow;
+    private double _rxMs, _rxMaxMs;
     private bool _noAuthExplained;
     private long _lastPong, _lastLivePing, _lastOneWayReconnect;   // is the peer HEARING us? see TimerLoop
     private int _pingsSincePong;
@@ -607,7 +611,15 @@ public sealed class Session : IDisposable
         // and the one ordering that matters -- an Enter arriving after the moves it precedes -- is handled
         // by the 300 ms delay before Detached. An earlier reorder buffer here stalled the mouse whenever a
         // packet was actually lost (not just reordered), which BLE does often, and made motion jumpy.
+        long t0 = Stopwatch.GetTimestamp();
         lock (_rxGate) Dispatch(packet);
+        double ms = (Stopwatch.GetTimestamp() - t0) * 1000.0 / Stopwatch.Frequency;
+        lock (_relGate)
+        {
+            _rxN++; _rxMs += ms;
+            if (ms > _rxMaxMs) _rxMaxMs = ms;
+            if (ms > 50) _rxSlow++;
+        }
     }
 
     /// <summary>Packets that failed decryption or the replay window (diagnostics).</summary>
@@ -1000,6 +1012,9 @@ public sealed class Session : IDisposable
                     {
                         int n = _stMoves + _stKeys + _stOther;
                         double secs = (now - _stSince) / (double)Stopwatch.Frequency;
+                        if (_injector.Active && _rxN > 0)
+                            Log.Info($"rx while controlled: {_rxN / secs:F0} frames/s; applying {_rxMs / _rxN:F1} ms avg, {_rxMaxMs:F0} ms max, {_rxSlow} over 50 ms; rtt {RttMs:F0}");
+                        _rxN = _rxSlow = 0; _rxMs = _rxMaxMs = 0;
                         if (_capture.Remote && n > 0)
                             Log.Info($"tx while controlling: {n / secs:F0} packets/s ({_stMoves} moves, {_stKeys} keys/buttons, {_stOther} other, {_stFailed} failed), {_stBytes / secs / 1024:F1} kB/s; send {_stSendMs / n:F1} ms avg, {_stMaxSendMs:F0} ms max; queue max {_stMaxQueued}; move gap {MovePacing.GapMs(RttMs)} ms at rtt {RttMs:F0}");
                         _stMoves = _stKeys = _stOther = _stFailed = _stMaxQueued = _stBytes = 0;
