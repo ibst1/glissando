@@ -130,10 +130,16 @@ public sealed class BleAutoChannel : IChannel
             // The peripheral half, kept alive: a start that fails (Fail() returns, or the stack throws) is retried
             // after 5 s; a start that HANGS in one of its awaits (seen once with the stack out of sorts) is given
             // 45 s, warned about at 15, then abandoned for a fresh instance -- the stuck one is left to the GC.
+            // Fresh GATT servers in quick succession are what this Intel stack takes worst: on 2026-10-06 LU
+            // recreated one every 15 s while the handshake failed, until a CreateAsync never returned and the
+            // stack stayed hung until Windows restarted. So the pause before the next server doubles each time
+            // the last one lived less than two minutes (5 s up to 5 min), and drops back once one lasts.
+            int nextDelayMs = 5000;
             pTask = Task.Run(async () =>
             {
                 while (!pToken.IsCancellationRequested)
                 {
+                    var ranFor = Stopwatch.StartNew();
                     var cur = p!;
                     Task run;
                     // On a task of its own: the stack can hang INSIDE a WinRT call (GattServiceProvider.CreateAsync
@@ -169,12 +175,17 @@ public sealed class BleAutoChannel : IChannel
                         var ex = run.Exception?.GetBaseException();
                         if (ex is not OperationCanceledException)
                         {
-                            Log.Error("BLE peripheral: " + ex?.Message + " - retrying in 5 s");
+                            Log.Error("BLE peripheral: " + ex?.Message + " - retrying");
                             StatusChanged?.Invoke("BLE error: " + Brief(ex?.Message ?? "?") + " (retrying)");
                         }
                     }
-                    else if (!pToken.IsCancellationRequested) Log.Info("BLE peripheral: run ended (reconnect or failure); a fresh GATT server starts in 5 s");
-                    try { await Task.Delay(5000, pToken); } catch (OperationCanceledException) { return; }
+                    if (ranFor.ElapsedMilliseconds >= 120_000) nextDelayMs = 5000;
+                    int delayMs = nextDelayMs;
+                    nextDelayMs = Math.Min(nextDelayMs * 2, 300_000);
+                    if (!pToken.IsCancellationRequested)
+                        Log.Info($"BLE peripheral: run ended after {ranFor.ElapsedMilliseconds / 1000} s; a fresh GATT server starts in {delayMs / 1000} s"
+                            + (delayMs > 5000 ? " (spaced out: fresh servers in quick succession wear the Bluetooth stack down)" : ""));
+                    try { await Task.Delay(delayMs, pToken); } catch (OperationCanceledException) { return; }
                     if (pToken.IsCancellationRequested) return;
                     StartPeripheral();
                 }

@@ -154,6 +154,8 @@ public sealed class Session : IDisposable
     private readonly byte[] _myNonce = new byte[16];
     private byte[]? _peerNonce; // the peer's last Hello nonce: a new one means a new Hello from it
     private long _lastPeer, _lastSend, _lastHello, _lastMoveSend;
+    private long _lastSendOk, _lastRawRx;   // the link itself carries packets each way (whatever they hold)
+    private bool _noAuthExplained;
     private long _lastPong, _lastLivePing, _lastOneWayReconnect;   // is the peer HEARING us? see TimerLoop
     private int _pingsSincePong;
     private long _linkedSince;   // when the current link came up, for the stuck-handshake watchdog
@@ -527,6 +529,7 @@ public sealed class Session : IDisposable
         Log.Info(up ? $"link up ({(_channel.IsCentral ? "central" : "peripheral")})" : "link down");
         RttMs = 0;
         _linkedSince = Stopwatch.GetTimestamp();
+        _noAuthExplained = false;
         // A fresh connection restarts the reliable stream on both sides.
         ResetReliable();
         // Without the link no mirror can drive the cursor here, so nothing may keep it hidden.
@@ -587,6 +590,7 @@ public sealed class Session : IDisposable
 
     private void OnReceived(byte[] packet)
     {
+        _lastRawRx = Stopwatch.GetTimestamp();
         // Apply frames one at a time, in arrival order. BLE may deliver a little out of order: the crypto
         // sliding window accepts that without calling it a replay, a reordered mouse delta is invisible,
         // and the one ordering that matters -- an Enter arriving after the moves it precedes -- is handled
@@ -936,7 +940,7 @@ public sealed class Session : IDisposable
                     if (crypto == null || !_channel.IsLinked) continue;
                     var packet = crypto.Seal(f.Encode());
                     _lastSend = Stopwatch.GetTimestamp();
-                    await _channel.SendAsync(packet);
+                    if (await _channel.SendAsync(packet)) _lastSendOk = Stopwatch.GetTimestamp();
                 }
             }
         }
@@ -985,11 +989,27 @@ public sealed class Session : IDisposable
                 // Linked but the handshake never completes: one side is talking to a stale connection (the
                 // other PC's process restarted, or it slept and came back with a new GATT server - the peer
                 // kept "linked" for minutes after a wake, 2026-09-15). Reconnect, at most every 15 s.
+                // But only when the link is actually broken. If packets go out AND come in, the link works and a
+                // new connection (for the peripheral: a new GATT server) cannot help -- the handshake fails on
+                // something else, a different passphrase, say -- and every fresh server wears this stack down
+                // (2026-10-06). Then say what is likely wrong, once, and leave the link alone.
                 if (Linked && !Authenticated && now - _linkedSince > Stopwatch.Frequency * 15)
                 {
-                    Log.Warn("linked for 15 s without authenticating; reconnecting");
-                    _linkedSince = now;
-                    _channel.Reconnect();
+                    bool bothWays = now - _lastSendOk < Stopwatch.Frequency * 5 && now - _lastRawRx < Stopwatch.Frequency * 5;
+                    if (bothWays)
+                    {
+                        if (!_noAuthExplained)
+                        {
+                            _noAuthExplained = true;
+                            Log.Warn("linked for 15 s and packets flow both ways, yet no authentication: the passphrases (or versions) differ? Keeping the link rather than reconnecting");
+                        }
+                    }
+                    else
+                    {
+                        Log.Warn("linked for 15 s without authenticating, and the link does not carry packets both ways; reconnecting");
+                        _linkedSince = now;
+                        _channel.Reconnect();
+                    }
                 }
 
                 // The mirror of the controlled side's rule further down: while we control the other PC it
