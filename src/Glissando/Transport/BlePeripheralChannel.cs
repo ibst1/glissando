@@ -16,9 +16,13 @@ public sealed class BlePeripheralChannel : IChannel
 
     /// <summary>True while Windows reports the advertisement as running. "Started without all advertisement
     /// data" (a payload that did not fit) is still on the air: service data with the 128-bit service UUID gave
-    /// that status, and reading it as "not advertising" made this PC connect while it was advertising too.</summary>
-    public bool IsAdvertising => _provider?.AdvertisementStatus is GattServiceProviderAdvertisementStatus.Started
+    /// that status, and reading it as "not advertising" made this PC connect while it was advertising too.
+    /// The status as last REPORTED (AdvertisementStatusChanged, or read by the run loop), never read from the
+    /// provider here: BleAutoChannel's watchdog asks this every second, and on a hung stack the provider's
+    /// property hung with it, so the watchdog that should have said "Bluetooth stuck" was stuck too (2026-10-06).</summary>
+    public bool IsAdvertising => _advStatus is GattServiceProviderAdvertisementStatus.Started
         or GattServiceProviderAdvertisementStatus.StartedWithoutAllAdvertisementData;
+    private volatile GattServiceProviderAdvertisementStatus _advStatus = GattServiceProviderAdvertisementStatus.Created;
 
     private const int MaxAdvRestarts = 8;
     private int _advFails;
@@ -72,6 +76,7 @@ public sealed class BlePeripheralChannel : IChannel
         _tx.SubscribedClientsChanged += OnSubscribedClientsChanged;
         _provider.AdvertisementStatusChanged += (s, e) =>
         {
+            _advStatus = e.Status;
             Log.Info($"BLE advertising {e.Status} ({e.Error})");
             StatusChanged?.Invoke(e.Status == GattServiceProviderAdvertisementStatus.Started ? "advertising" : $"advertising {e.Status}");
         };
@@ -90,7 +95,7 @@ public sealed class BlePeripheralChannel : IChannel
         while (!loop.IsCancellationRequested)
         {
             try { await Task.Delay(2000, loop); } catch (OperationCanceledException) { break; }
-            var st = _provider.AdvertisementStatus;
+            var st = _advStatus = _provider.AdvertisementStatus;
             if (st is GattServiceProviderAdvertisementStatus.Aborted or GattServiceProviderAdvertisementStatus.Stopped)
             {
                 if (_advFails >= MaxAdvRestarts)
@@ -106,6 +111,7 @@ public sealed class BlePeripheralChannel : IChannel
             else if (st == GattServiceProviderAdvertisementStatus.Started) _advFails = 0;
         }
         try { _provider.StopAdvertising(); } catch { }
+        _advStatus = GattServiceProviderAdvertisementStatus.Stopped;
         if (!ct.IsCancellationRequested)
         {
             // A restart, not the end: drop this server so nothing keeps it alive, and report the link gone.
