@@ -247,7 +247,7 @@ public sealed class BleAutoChannel : IChannel
             {
                 // Session end or Sleep(): stop scanning, stop advertising and release the GATT server for real.
                 try { watcher.Stop(); } catch { }
-                if (p != null) { pCts!.Cancel(); try { await pTask!; } catch { } detachP?.Invoke(); try { p.Dispose(); } catch { } }
+                if (p != null) { pCts!.Cancel(); try { await pTask!; } catch { } detachP?.Invoke(); DisposeAside(p); }
                 _active = null;
                 return;
             }
@@ -260,7 +260,7 @@ public sealed class BleAutoChannel : IChannel
             pCts!.Cancel();
             try { await pTask!; } catch { }
             detachP?.Invoke();
-            p.Dispose();
+            DisposeAside(p);
         }
 
         // Three empty scans (60 s) and the central gives up, which ends this run: the loop above starts over
@@ -274,6 +274,20 @@ public sealed class BleAutoChannel : IChannel
     }
 
     private bool _yieldNextRound;
+
+    /// <summary>
+    /// Release a peripheral without waiting for it. On a hung stack its StopAdvertising hangs too (LU,
+    /// 2026-10-06): disposed inline, the peer had been seen and this PC was to connect, but the central never
+    /// started, and exiting hung the same way. Off to the side, a hang costs a thread, not the link.
+    /// </summary>
+    private static void DisposeAside(BlePeripheralChannel p)
+    {
+        var t = Task.Run(() => { try { p.Dispose(); } catch { } });
+        _ = Task.WhenAny(t, Task.Delay(10000)).ContinueWith(w =>
+        {
+            if (w.Result != t) Log.Warn("BLE peripheral: releasing the old GATT server hangs (Bluetooth stack stuck); carrying on without it");
+        });
+    }
 
     private void Remember(string role)
     {
@@ -299,5 +313,9 @@ public sealed class BleAutoChannel : IChannel
 
     public void Reconnect() => _active?.Reconnect();
 
-    public void Dispose() => _active?.Dispose();
+    public void Dispose()
+    {
+        if (_active is BlePeripheralChannel p) DisposeAside(p);   // exiting must not hang on a stuck stack
+        else _active?.Dispose();
+    }
 }
