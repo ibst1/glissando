@@ -446,7 +446,8 @@ public sealed class Session : IDisposable
         {
             if (_s.HideCursorWhileControlling) CursorHider.Hide();
             StateChanged?.Invoke();
-            if (_s.SyncClipboard) SendClipboard();
+            // Off this thread: reading the clipboard waits for the UI thread, and this may be the input-hook thread.
+            if (_s.SyncClipboard) Task.Run(SendClipboard);
         };
         _capture.LeftRemote += () => { CursorHider.Restore(); StateChanged?.Invoke(); };
         _capture.LockToggleRequested += () => SetLocked(!Locked);
@@ -467,7 +468,8 @@ public sealed class Session : IDisposable
         {
             if (!_injector.Active) return;
             Log.Info($"local input on this PC while controlled by {PeerName}; taking control back");
-            _injector.Deactivate(); // the peer stops via the ControlAlive -> Detached handshake
+            // Not here, on the input-hook thread: releasing keys is SendInput, which waits for this very hook.
+            Task.Run(_injector.Deactivate); // the peer stops via the ControlAlive -> Detached handshake
         };
         // Someone is at this PC: an invisible window in front of them would swallow their clicks, so show it.
         // The mirror goes on; only the hiding ends, until the next mirror is started.
@@ -476,6 +478,13 @@ public sealed class Session : IDisposable
             // Show a hidden mirrored window again only when the person at this PC actually runs into it: a click
             // where it invisibly is, or typing while it holds the focus. Any click or key at all was too eager -
             // the user sat at this PC working in another window and the mirror never stayed hidden (2026-09-13).
+            // Raised on the input-hook thread for every local key and click: decide and reveal off it, since
+            // showing a window again (SetWindowPos, a redraw) waits on that window's program.
+            if (!Mirroring) return;
+            Task.Run(() => RevealIfHit(at));
+        };
+        void RevealIfHit(Point? at)
+        {
             foreach (var m in Mirrors)
             {
                 if (!m.Hidden) continue;
@@ -488,7 +497,7 @@ public sealed class Session : IDisposable
                 StateChanged?.Invoke();
                 break;   // a click lands on one window only, the top one
             }
-        };
+        }
         _injector.InputWhileInactive += () =>
         {
             // Give a late Enter 300 ms to show up before declaring the two sides out of step.

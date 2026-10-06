@@ -108,6 +108,16 @@ public sealed class InputCapture : IDisposable
     private readonly IntPtr _rawInputWindow;
     private Native.HookProc? _mouseProc, _keyProc;
     private IntPtr _mouseHook, _keyHook;
+    private Thread? _hookThread;
+    private uint _hookThreadId;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public int ptX, ptY; }
+    [DllImport("user32.dll")] private static extern int GetMessage(out MSG msg, IntPtr hwnd, uint min, uint max);
+    [DllImport("user32.dll")] private static extern bool TranslateMessage(ref MSG msg);
+    [DllImport("user32.dll")] private static extern IntPtr DispatchMessage(ref MSG msg);
+    [DllImport("user32.dll")] private static extern bool PostThreadMessage(uint threadId, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
     private Rectangle _screen;
     private long _ignoreEdgeUntil;
     private readonly HashSet<(ushort vk, ushort scan, bool ext)> _keysDown = [];
@@ -133,15 +143,43 @@ public sealed class InputCapture : IDisposable
         _screen = Layout.MyVirtualScreen();
     }
 
+    /// <summary>
+    /// Installs the low-level hooks on a thread of their own and registers Raw Input with the UI window.
+    /// The hooks used to live on the UI thread. Every key and mouse event on this PC -- the ones we inject for
+    /// the other PC as well -- waits until each low-level hook has answered, and that thread also serves the
+    /// tray, menus, mirror windows and clipboard. Whenever it was busy for a moment, SendInput waited out the
+    /// 1 s hook timeout and typing driven from the other PC crawled (RS driving LU, 2026-10-06: the UI thread
+    /// answered after 0.6-2.8 s, SendInput took 1000 ms). The hook thread does nothing but pump the hooks.
+    /// </summary>
     public void Install()
     {
         _mouseProc = MouseHook;
         _keyProc = KeyHook;
-        var mod = Native.GetModuleHandle(null);
-        _mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _mouseProc, mod, 0);
-        if (_mouseHook == IntPtr.Zero) throw new InvalidOperationException("WH_MOUSE_LL failed: " + Marshal.GetLastWin32Error());
-        _keyHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, _keyProc, mod, 0);
-        if (_keyHook == IntPtr.Zero) throw new InvalidOperationException("WH_KEYBOARD_LL failed: " + Marshal.GetLastWin32Error());
+        var ready = new ManualResetEventSlim();
+        Exception? failed = null;
+        _hookThread = new Thread(() =>
+        {
+            try
+            {
+                _hookThreadId = GetCurrentThreadId();
+                var mod = Native.GetModuleHandle(null);
+                _mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _mouseProc, mod, 0);
+                if (_mouseHook == IntPtr.Zero) throw new InvalidOperationException("WH_MOUSE_LL failed: " + Marshal.GetLastWin32Error());
+                _keyHook = Native.SetWindowsHookEx(Native.WH_KEYBOARD_LL, _keyProc, mod, 0);
+                if (_keyHook == IntPtr.Zero) throw new InvalidOperationException("WH_KEYBOARD_LL failed: " + Marshal.GetLastWin32Error());
+            }
+            catch (Exception ex) { failed = ex; ready.Set(); return; }
+            ready.Set();
+            // Low-level hooks are called through this thread's message loop; nothing else runs here.
+            while (GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
+            {
+                TranslateMessage(ref msg);
+                DispatchMessage(ref msg);
+            }
+        }) { IsBackground = true, Name = "input-hooks", Priority = ThreadPriority.Highest };
+        _hookThread.Start();
+        ready.Wait();
+        if (failed != null) throw failed;
 
         var rid = new[] { new Native.RAWINPUTDEVICE { usUsagePage = 1, usUsage = 2, dwFlags = Native.RIDEV_INPUTSINK, hwndTarget = _rawInputWindow } };
         if (!Native.RegisterRawInputDevices(rid, 1, (uint)Marshal.SizeOf<Native.RAWINPUTDEVICE>()))
@@ -240,7 +278,7 @@ public sealed class InputCapture : IDisposable
 
     private void Button(byte button, bool down)
     {
-        if (down) _buttonsDown.Add(button); else _buttonsDown.Remove(button);
+        lock (_modeGate) { if (down) _buttonsDown.Add(button); else _buttonsDown.Remove(button); }
         Output?.Invoke(Frame.MouseButton(button, down));
     }
 
@@ -320,7 +358,8 @@ public sealed class InputCapture : IDisposable
             return 1;
         }
 
-        if (up) _keysDown.Remove(key); else _keysDown.Add(key);
+        // The hooks run on their own thread now, while Raw Input (crossings) runs on the UI thread: both touch these.
+        lock (_modeGate) { if (up) _keysDown.Remove(key); else _keysDown.Add(key); }
         // Forward auto-repeat too. For a held key it re-asserts the down ~30x/s, which is what keeps a held
         // modifier (Shift while arrowing, Ctrl while typing) alive across a dropped packet on the lossy link,
         // and for an ordinary key it produces hold-to-repeat on the other PC.
@@ -342,8 +381,8 @@ public sealed class InputCapture : IDisposable
     public static bool KeyLog;
 
     // LEFT Ctrl only, so a CapsLock-to-right-Ctrl remapper's chords do not fire our escape/lock/jump hotkeys.
-    private bool LCtrlDown() => _keysDown.Any(k => k.vk == Native.VK_LCONTROL);
-    private bool AltDown() => _keysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU);
+    private bool LCtrlDown() { lock (_modeGate) return _keysDown.Any(k => k.vk == Native.VK_LCONTROL); }
+    private bool AltDown() { lock (_modeGate) return _keysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU); }
 
     /// <summary>Left Ctrl and Alt held, as Windows sees it here or as the keys forwarded to the other PC say.</summary>
     private bool LocalHotkeyModifiers()
@@ -502,5 +541,6 @@ public sealed class InputCapture : IDisposable
         if (_mouseHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_mouseHook);
         if (_keyHook != IntPtr.Zero) Native.UnhookWindowsHookEx(_keyHook);
         _mouseHook = _keyHook = IntPtr.Zero;
+        if (_hookThreadId != 0) PostThreadMessage(_hookThreadId, 0x0012 /* WM_QUIT */, IntPtr.Zero, IntPtr.Zero);
     }
 }

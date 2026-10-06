@@ -136,8 +136,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _capture.Install();
         // Touchpad scroll reaches no hook; a window under the frozen cursor catches it (see ScrollCatcher).
         _scrollCatcher.Wheel += _capture.ForwardWheel;
-        _capture.EnteredRemote += () => { Native.GetCursorPos(out var p); _scrollCatcher.ShowAt(new Point(p.X, p.Y)); };
-        _capture.LeftRemote += _scrollCatcher.HideAway;
+        // These may now be raised on the input-hook thread (a hotkey): the scroll catcher is a form of the UI thread.
+        _capture.EnteredRemote += () => { Native.GetCursorPos(out var p); _window.BeginInvoke(() => _scrollCatcher.ShowAt(new Point(p.X, p.Y))); };
+        _capture.LeftRemote += () => _window.BeginInvoke(_scrollCatcher.HideAway);
 
         _injector = new InputInjector(layout);
         _window.DisplayChanged += () => _session?.ScreenChanged();
