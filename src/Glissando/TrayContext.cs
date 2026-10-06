@@ -409,7 +409,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         // which also runs our low-level input hooks; with the round trip in the tip it changed with nearly every
         // state change. So: no round trip in the tip (it is in the menu's status line), and no call unless
         // something actually changed.
-        string text = problem.Contains("restart Windows") ? Trim(tip, 40) + " - BLUETOOTH STUCK"
+        string tipText = problem.Contains("restart Windows") ? Trim(tip, 40) + " - BLUETOOTH STUCK"
             : problem != "" ? Trim(tip, 42) + " - Bluetooth not answering" : Trim(tip, 63);
         var icon = _session.TransportStatus.StartsWith("BLE error") || problem != "" ? _iconError
             : _session.Controlling ? _iconControlling
@@ -417,7 +417,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             : _session.Locked ? _iconLocked
             : _session.Authenticated ? _iconReady
             : _iconIdle;
-        if (_tray.Text != text) _tray.Text = text;
+        if (_tray.Text != tipText) _tray.Text = tipText;
         if (!ReferenceEquals(_tray.Icon, icon)) _tray.Icon = icon;
     }
 
