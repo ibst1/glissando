@@ -483,11 +483,14 @@ public sealed class Crypto : IDisposable
 public static class MovePacing
 {
     public const int BaseGapMs = 8;
-    public const int MaxGapMs = 40;
+    public const int MaxGapMs = 60;
 
+    // Backs off from 40 ms on, to up to 60 ms between moves: with the roles turned round on 2026-10-06 (the
+    // peer as BLE peripheral, its moves going out as notifications) the gentler 60 ms / 40 ms curve still let
+    // the round trip climb to 800 ms whenever that PC drove this one.
     public static int GapMs(double rttMs)
     {
-        if (rttMs < 60) return BaseGapMs;
-        return (int)Math.Clamp(rttMs / 4, BaseGapMs, MaxGapMs);
+        if (rttMs < 40) return BaseGapMs;
+        return (int)Math.Clamp(rttMs / 3, 15, MaxGapMs);
     }
 }

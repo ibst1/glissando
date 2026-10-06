@@ -163,8 +163,8 @@ public class MovePacingTests
     [Theory]
     [InlineData(0, MovePacing.BaseGapMs)]     // no round trip measured yet
     [InlineData(35, MovePacing.BaseGapMs)]    // a healthy link
-    [InlineData(120, 30)]                     // a backlog: back off
-    [InlineData(3000, MovePacing.MaxGapMs)]   // never slower than 25 moves a second
+    [InlineData(120, 40)]                     // a backlog: back off
+    [InlineData(3000, MovePacing.MaxGapMs)]   // never slower than about 16 moves a second
     public void GapFollowsRoundTrip(double rtt, int expected) => Assert.Equal(expected, MovePacing.GapMs(rtt));
 }
 

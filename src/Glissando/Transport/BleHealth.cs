@@ -8,9 +8,10 @@ namespace Glissando.Transport;
 /// other, with no hint what to do.
 ///
 /// So the places that see such a hang report it here, and this turns the reports into one plain verdict the
-/// tray shows: a first sign is "turn Bluetooth off and on"; signs that keep coming for several minutes (the
-/// toggle did not help, as that morning) are "restart Windows on this PC", the only cure seen. A link that
-/// holds for ten minutes clears it. The verdict also goes to the other PC, so it can say which PC to restart.
+/// tray shows: a second sign is "turn Bluetooth off and on" (a single one says nothing yet); signs that keep
+/// coming for several minutes (the toggle did not help, as that morning) are "restart Windows on this PC", the
+/// only cure seen. A link that holds for three minutes clears it. The verdict also goes to the other PC, so it
+/// can say which PC to restart.
 /// </summary>
 public static class BleHealth
 {
@@ -18,6 +19,10 @@ public static class BleHealth
 
     private const long ForgetAfterMs = 30 * 60_000;   // signs older than this no longer count
     private const long PersistsMs = 3 * 60_000;       // signs spread over this long: toggling did not help
+    // One sign alone is not a stuck stack: a lookup that times out once right after either PC restarted is
+    // known and harmless, and it put "BLUETOOTH STUCK" on the tray for ten minutes of a working link
+    // (2026-10-06). Two signs are.
+    private const int SignsForVerdict = 2;
 
     private static readonly object Gate = new();
     private static readonly List<long> Signs = [];    // Environment.TickCount64 of each report
@@ -37,7 +42,7 @@ public static class BleHealth
             LastSign = sign;
             v = VerdictLocked();
         }
-        Log.Warn($"Bluetooth health: {sign} -> {Describe(v)}");
+        Log.Warn($"Bluetooth health: {sign} -> {(v == Verdict.Fine ? "one sign, watching" : Describe(v))}");
         Changed?.Invoke();
     }
 
@@ -47,11 +52,11 @@ public static class BleHealth
     {
         long now = Environment.TickCount64;
         Signs.RemoveAll(t => now - t > ForgetAfterMs);
-        if (Signs.Count == 0) return Verdict.Fine;
+        if (Signs.Count < SignsForVerdict) return Verdict.Fine;
         return Signs[^1] - Signs[0] >= PersistsMs ? Verdict.RestartWindows : Verdict.ToggleBluetooth;
     }
 
-    /// <summary>The link has held for a good while: whatever was wrong is over.</summary>
+    /// <summary>The link has held for a good while (three minutes): whatever was wrong is over.</summary>
     public static void LinkHeld()
     {
         lock (Gate)
@@ -60,7 +65,7 @@ public static class BleHealth
             Signs.Clear();
             LastSign = "";
         }
-        Log.Info("Bluetooth health: the link has held for 10 minutes; the stack is fine again");
+        Log.Info("Bluetooth health: the link has held for 3 minutes; the stack is fine again");
         Changed?.Invoke();
     }
 

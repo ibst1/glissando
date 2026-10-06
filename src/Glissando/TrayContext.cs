@@ -388,7 +388,8 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             string locked = _session.Locked ? ", locked" : "";
             tip += $": {role}{peer}{rtt}{locked}";
         }
-        _tray.Text = problem != "" ? Trim(tip, 40) + " - BLUETOOTH STUCK" : Trim(tip, 63);
+        _tray.Text = problem.Contains("restart Windows") ? Trim(tip, 40) + " - BLUETOOTH STUCK"
+            : problem != "" ? Trim(tip, 42) + " - Bluetooth not answering" : Trim(tip, 63);
         _tray.Icon = _session.TransportStatus.StartsWith("BLE error") || problem != "" ? _iconError
             : _session.Controlling ? _iconControlling
             : _session.Controlled ? _iconControlled

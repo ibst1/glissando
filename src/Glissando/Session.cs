@@ -878,7 +878,10 @@ public sealed class Session : IDisposable
         f.Payload.CopyTo(p, 0);
         System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(f.Payload.Length), seq);
         var rel = new Frame(f.Type, p);
-        for (int i = 0; i < Redundancy; i++) Enqueue(rel);
+        // The copies guard against a packet lost on a quiet link. Behind a backlog nothing is lost, only late,
+        // and three copies of every key made a busy link three times busier (2026-10-06): one copy then.
+        int copies = Volatile.Read(ref _queued) > 8 ? 1 : Redundancy;
+        for (int i = 0; i < copies; i++) Enqueue(rel);
     }
 
     /// <summary>Reliable frames carry a trailing 2-byte id; a copy we have already applied is dropped.
@@ -965,8 +968,8 @@ public sealed class Session : IDisposable
                 long now = Stopwatch.GetTimestamp();
                 if (_injector.Active || (!_capture.Remote && now - _capture.LastLocalMouseTicks < Stopwatch.Frequency / 2)) CursorHider.Restore(CursorHider.Mirror);
                 if (!_channel.IsLinked) continue;
-                // Ten minutes of an authenticated link: the stack is fine, whatever was reported before.
-                if (Authenticated && now - _linkedSince > Stopwatch.Frequency * 600) Transport.BleHealth.LinkHeld();
+                // Three minutes of an authenticated link: the stack is fine, whatever was reported before.
+                if (Authenticated && now - _linkedSince > Stopwatch.Frequency * 180) Transport.BleHealth.LinkHeld();
                 double sinceSend = (now - _lastSend) * 1000.0 / Stopwatch.Frequency;
                 double sincePeer = (now - _lastPeer) * 1000.0 / Stopwatch.Frequency;
                 double sinceHello = (now - _lastHello) * 1000.0 / Stopwatch.Frequency;
