@@ -155,6 +155,14 @@ public sealed class Session : IDisposable
     private byte[]? _peerNonce; // the peer's last Hello nonce: a new one means a new Hello from it
     private long _lastPeer, _lastSend, _lastHello, _lastMoveSend;
     private long _lastSendOk, _lastRawRx;   // the link itself carries packets each way (whatever they hold)
+
+    // Sender statistics, logged every 2 s while this PC controls the other one: where does the time go when
+    // driving lags? Glissando's own queue growing means SendAsync is slow (the stack makes us wait); a short
+    // queue with fast sends and a long round trip means the stack takes packets faster than the radio sends
+    // them (2026-10-06: RS -> LU lagged up to 3.5 s whichever PC was central).
+    private int _stMoves, _stKeys, _stOther, _stFailed, _stMaxQueued, _stBytes;
+    private double _stSendMs, _stMaxSendMs;
+    private long _stSince = Stopwatch.GetTimestamp();
     private bool _noAuthExplained;
     private long _lastPong, _lastLivePing, _lastOneWayReconnect;   // is the peer HEARING us? see TimerLoop
     private int _pingsSincePong;
@@ -946,7 +954,22 @@ public sealed class Session : IDisposable
                     if (crypto == null || !_channel.IsLinked) continue;
                     var packet = crypto.Seal(f.Encode());
                     _lastSend = Stopwatch.GetTimestamp();
-                    if (await _channel.SendAsync(packet)) _lastSendOk = Stopwatch.GetTimestamp();
+                    int q = Volatile.Read(ref _queued);
+                    bool ok = await _channel.SendAsync(packet);
+                    long done = Stopwatch.GetTimestamp();
+                    if (ok) _lastSendOk = done;
+                    double ms = (done - _lastSend) * 1000.0 / Stopwatch.Frequency;
+                    lock (_relGate)
+                    {
+                        if (f.Type == FrameType.MouseMove) _stMoves++;
+                        else if (f.Type is FrameType.Key or FrameType.TypedKey or FrameType.MouseButton) _stKeys++;
+                        else _stOther++;
+                        if (!ok) _stFailed++;
+                        _stBytes += packet.Length;
+                        _stSendMs += ms;
+                        if (ms > _stMaxSendMs) _stMaxSendMs = ms;
+                        if (q > _stMaxQueued) _stMaxQueued = q;
+                    }
                 }
             }
         }
@@ -968,6 +991,20 @@ public sealed class Session : IDisposable
                 long now = Stopwatch.GetTimestamp();
                 if (_injector.Active || (!_capture.Remote && now - _capture.LastLocalMouseTicks < Stopwatch.Frequency / 2)) CursorHider.Restore(CursorHider.Mirror);
                 if (!_channel.IsLinked) continue;
+                if (now - _stSince > Stopwatch.Frequency * 2)
+                {
+                    lock (_relGate)
+                    {
+                        int n = _stMoves + _stKeys + _stOther;
+                        double secs = (now - _stSince) / (double)Stopwatch.Frequency;
+                        if (_capture.Remote && n > 0)
+                            Log.Info($"tx while controlling: {n / secs:F0} packets/s ({_stMoves} moves, {_stKeys} keys/buttons, {_stOther} other, {_stFailed} failed), {_stBytes / secs / 1024:F1} kB/s; send {_stSendMs / n:F1} ms avg, {_stMaxSendMs:F0} ms max; queue max {_stMaxQueued}; move gap {MovePacing.GapMs(RttMs)} ms at rtt {RttMs:F0}");
+                        _stMoves = _stKeys = _stOther = _stFailed = _stMaxQueued = _stBytes = 0;
+                        _stSendMs = _stMaxSendMs = 0;
+                        _stSince = now;
+                    }
+                }
+
                 // Three minutes of an authenticated link: the stack is fine, whatever was reported before.
                 if (Authenticated && now - _linkedSince > Stopwatch.Frequency * 180) Transport.BleHealth.LinkHeld();
                 double sinceSend = (now - _lastSend) * 1000.0 / Stopwatch.Frequency;
