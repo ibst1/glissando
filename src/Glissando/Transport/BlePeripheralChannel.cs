@@ -155,6 +155,14 @@ public sealed class BlePeripheralChannel : IChannel
         IsLinked = up;
         StatusChanged?.Invoke(up ? "linked" : "advertising");
         LinkChanged?.Invoke(up);
+        // The client has gone: put the advertisement on the air afresh. After RS disconnected at 11:07
+        // (2026-10-06) Windows went on reporting "Started" while nothing was advertised, and RS found no one
+        // until Glissando restarted here. Restarting the advertisement is cheap; the GATT server stays.
+        if (!up && _provider is { } prov)
+        {
+            try { prov.StopAdvertising(); prov.StartAdvertising(_advParams); Log.Info("BLE peripheral: client gone; advertising restarted"); }
+            catch (Exception ex) { Log.Warn("BLE peripheral: restarting the advertisement: " + ex.Message); }
+        }
     }
 
     public async Task<bool> SendAsync(byte[] packet)

@@ -712,6 +712,9 @@ public sealed class Session : IDisposable
                 // peripheral has nothing to release; the central's Windows drops the link when its process ends.
                 Log.Info($"{PeerName} says goodbye (exiting or sleeping)");
                 SetAuthenticated(false);
+                // What arrived before the goodbye proves nothing about the link from now on: without this the
+                // "packets flow both ways" rule kept a link to a process that had just exited (2026-10-06).
+                _lastRawRx = 0;
                 if (_channel.IsCentral) _channel.Reconnect();
                 break;
 
