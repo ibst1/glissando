@@ -27,7 +27,13 @@ internal static class WindowCapture
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowTextW(IntPtr hwnd, StringBuilder s, int max);
+    // InternalGetWindowText, not GetWindowText: GetWindowText of another process's window sends it WM_GETTEXT
+    // and waits for the answer. The tray reads the foreground window's title every 400 ms on the UI thread,
+    // which also runs our low-level input hooks; while the program in front was busy taking the keys typed
+    // into it, that wait blocked our hooks, so every injected key waited out the 1 s hook timeout (RS driving
+    // LU, 2026-10-06: typing crawled, SendInput 1000 ms). InternalGetWindowText reads the title Windows keeps
+    // and never waits on the window's thread.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "InternalGetWindowText")] private static extern int GetWindowTextW(IntPtr hwnd, StringBuilder s, int max);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc cb, IntPtr lp);
     private delegate bool EnumProc(IntPtr hwnd, IntPtr lp);
 

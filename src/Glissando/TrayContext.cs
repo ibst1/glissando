@@ -402,18 +402,23 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         {
             string role = _session.Controlling ? "controlling" : _session.Controlled ? "controlled" : "linked";
             string peer = string.IsNullOrEmpty(_session.PeerName) ? "" : " " + _session.PeerName;
-            string rtt = _session.RttMs > 0 ? $", {_session.RttMs:F0} ms" : "";
             string locked = _session.Locked ? ", locked" : "";
-            tip += $": {role}{peer}{rtt}{locked}";
+            tip += $": {role}{peer}{locked}";   // no round trip here: it changes all the time (see below)
         }
-        _tray.Text = problem.Contains("restart Windows") ? Trim(tip, 40) + " - BLUETOOTH STUCK"
+        // Every change of the tooltip or icon is a call into Explorer that waits for its answer, on this UI thread,
+        // which also runs our low-level input hooks; with the round trip in the tip it changed with nearly every
+        // state change. So: no round trip in the tip (it is in the menu's status line), and no call unless
+        // something actually changed.
+        string text = problem.Contains("restart Windows") ? Trim(tip, 40) + " - BLUETOOTH STUCK"
             : problem != "" ? Trim(tip, 42) + " - Bluetooth not answering" : Trim(tip, 63);
-        _tray.Icon = _session.TransportStatus.StartsWith("BLE error") || problem != "" ? _iconError
+        var icon = _session.TransportStatus.StartsWith("BLE error") || problem != "" ? _iconError
             : _session.Controlling ? _iconControlling
             : _session.Controlled ? _iconControlled
             : _session.Locked ? _iconLocked
             : _session.Authenticated ? _iconReady
             : _iconIdle;
+        if (_tray.Text != text) _tray.Text = text;
+        if (!ReferenceEquals(_tray.Icon, icon)) _tray.Icon = icon;
     }
 
     private void ShowBluetoothBalloon(string problem)
