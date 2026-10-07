@@ -288,12 +288,14 @@ public sealed class InputCapture : IDisposable
         var info = Marshal.PtrToStructure<Native.KBDLLHOOKSTRUCT>(lParam);
         bool up = (info.flags & Native.LLKHF_UP) != 0;
         bool ext = (info.flags & Native.LLKHF_EXTENDED) != 0;
+        // The left Ctrl as the KEYBOARD holds it, in every mode: only a physical press counts for our hotkeys.
+        if (info.vkCode == Native.VK_LCONTROL && (info.flags & Native.LLKHF_INJECTED) == 0) _physLCtrl = !up;
 
         if (!Remote)
         {
-            // Local mode: only the lock/jump hotkeys are ours. LEFT Ctrl specifically, so a key-remapper that
-            // turns CapsLock into RIGHT Ctrl (Sostenuto does) cannot trip these -- otherwise its CapsLock+Alt+J
-            // reads as Ctrl+Alt+J and jumps. Modifier state is real here (nothing is swallowed).
+            // Local mode: only the lock/jump hotkeys are ours. LEFT Ctrl specifically, physically pressed, and no
+            // right Ctrl, so a key-remapper that turns CapsLock into RIGHT Ctrl (Sostenuto does) cannot trip these
+            // -- otherwise its CapsLock+Alt+J reads as Ctrl+Alt+J and jumps (see LCtrlDown).
             // While the keys are going to the other PC, a held Ctrl or Alt was swallowed and sent there, so
             // Windows here does not know it is down; ask the typed-keys set too, or Ctrl+Alt+L -- the very way
             // to bring the keyboard home -- can never fire (2026-09-29).
@@ -380,21 +382,31 @@ public sealed class InputCapture : IDisposable
     /// <summary>Log every key forwarded and applied, to diagnose lost keystrokes. Enable with --keylog.</summary>
     public static bool KeyLog;
 
-    // LEFT Ctrl only, so a CapsLock-to-right-Ctrl remapper's chords do not fire our escape/lock/jump hotkeys.
-    private bool LCtrlDown() { lock (_modeGate) return _keysDown.Any(k => k.vk == Native.VK_LCONTROL); }
+    // Our hotkeys want the LEFT Ctrl, physically pressed, and no right Ctrl. Sostenuto turns CapsLock into a
+    // right Ctrl, and with CapsAltIsCtrl its CapsLock+Alt+J/L (!>^j, !>^l) sends Ctrl+Left/Right by pressing
+    // the LEFT Ctrl itself: Windows then reported the left Ctrl down, and with Alt and J held that read as our
+    // Ctrl+Alt+J (2026-10-07). A left Ctrl a program injects never counts, and a right Ctrl held (by the user
+    // or by such a remapper) rules our hotkeys out.
+    private volatile bool _physLCtrl;
+
+    private bool RCtrlHeld()
+    {
+        if (Native.IsDown(Native.VK_RCONTROL)) return true;
+        lock (_modeGate) return _keysDown.Any(k => k.vk == Native.VK_RCONTROL) || _typedKeysDown.Any(k => k.vk == Native.VK_RCONTROL);
+    }
+
+    private bool LCtrlDown() => _physLCtrl && !RCtrlHeld();
     private bool AltDown() { lock (_modeGate) return _keysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU); }
 
-    /// <summary>Left Ctrl and Alt held, as Windows sees it here or as the keys forwarded to the other PC say.</summary>
+    /// <summary>Left Ctrl (physically) and Alt held, as Windows sees it here or as the keys forwarded to the
+    /// other PC say, and no right Ctrl.</summary>
     private bool LocalHotkeyModifiers()
     {
-        bool ctrl = Native.IsDown(Native.VK_LCONTROL), alt = Native.IsDown(Native.VK_MENU);
-        if (!ctrl || !alt)
-            lock (_modeGate)
-            {
-                ctrl = ctrl || _typedKeysDown.Any(k => k.vk == Native.VK_LCONTROL);
-                alt = alt || _typedKeysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU or Native.VK_MENU);
-            }
-        return ctrl && alt;
+        if (!LCtrlDown()) return false;
+        bool alt = Native.IsDown(Native.VK_MENU);
+        if (!alt)
+            lock (_modeGate) alt = _typedKeysDown.Any(k => k.vk is Native.VK_LMENU or Native.VK_RMENU or Native.VK_MENU);
+        return alt;
     }
 
     // ---- raw input --------------------------------------------------------------
