@@ -218,3 +218,14 @@ public class MirrorFrameTests
         Assert.Equal(data, f.Payload[Frame.MirrorChunkHeader..]);
     }
 }
+
+public class SendPacingTests
+{
+    [Theory]
+    [InlineData(30, 0)]       // healthy: no floor
+    [InlineData(100, 0)]      // a slower but steady link
+    [InlineData(200, 15)]     // a backlog building
+    [InlineData(600, 25)]
+    [InlineData(8700, 40)]    // RS -> LU, 2026-10-07
+    public void FloorFollowsRoundTrip(double rtt, int expected) => Assert.Equal(expected, SendPacing.GapMs(rtt));
+}

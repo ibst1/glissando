@@ -480,6 +480,22 @@ public sealed class Crypto : IDisposable
 /// with the peer dropping moves that arrived too late for its replay window. Spacing moves out lets the ones
 /// that arrive in between coalesce into one; the gap widens when the measured round trip shows a backlog anyway.
 /// </summary>
+/// <summary>
+/// The least time between any two packets, from the round trip: none on a healthy link, then rising to 40 ms
+/// (25 packets/s) as the round trip shows a backlog. Moves still coalesce behind it, keys and control frames
+/// just wait their turn; together this keeps the stack's hidden buffer from filling (see MovePacing).
+/// </summary>
+public static class SendPacing
+{
+    public static int GapMs(double rttMs) => rttMs switch
+    {
+        < 150 => 0,
+        < 400 => 15,
+        < 1000 => 25,
+        _ => 40,
+    };
+}
+
 public static class MovePacing
 {
     public const int BaseGapMs = 8;

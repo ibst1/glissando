@@ -915,8 +915,11 @@ public sealed class Session : IDisposable
         System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(f.Payload.Length), seq);
         var rel = new Frame(f.Type, p);
         // The copies guard against a packet lost on a quiet link. Behind a backlog nothing is lost, only late,
-        // and three copies of every key made a busy link three times busier (2026-10-06): one copy then.
-        int copies = Volatile.Read(ref _queued) > 8 ? 1 : Redundancy;
+        // and three copies of every key made a busy link three times busier (2026-10-06): one copy then. A
+        // backlog shows in our own queue, or -- when the stack takes writes faster than the radio sends them,
+        // as a BLE central's WriteWithoutResponse does -- only in the round trip (RS -> LU, 2026-10-07: 8.7 s).
+        bool backlog = Volatile.Read(ref _queued) > 8 || RttMs > 150;
+        int copies = backlog ? 1 : Redundancy;
         for (int i = 0; i < copies; i++) Enqueue(rel);
     }
 
@@ -980,6 +983,15 @@ public sealed class Session : IDisposable
                     }
                     var crypto = _crypto;
                     if (crypto == null || !_channel.IsLinked) continue;
+                    // A floor under the time between ANY two packets, from the round trip: the move gap alone
+                    // left keys, their copies and the control frames free, and RS still sent 100 packets/s into
+                    // a link that carried about 50, the round trip climbing to 8.7 s (2026-10-07).
+                    int floorMs = SendPacing.GapMs(RttMs);
+                    if (floorMs > 0)
+                    {
+                        double since = (Stopwatch.GetTimestamp() - _lastSend) * 1000.0 / Stopwatch.Frequency;
+                        if (since < floorMs) await Task.Delay(floorMs - (int)since, _cts.Token);
+                    }
                     var packet = crypto.Seal(f.Encode());
                     _lastSend = Stopwatch.GetTimestamp();
                     int q = Volatile.Read(ref _queued);
