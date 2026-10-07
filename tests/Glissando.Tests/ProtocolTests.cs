@@ -229,3 +229,33 @@ public class SendPacingTests
     [InlineData(8700, 40)]    // RS -> LU, 2026-10-07
     public void FloorFollowsRoundTrip(double rtt, int expected) => Assert.Equal(expected, SendPacing.GapMs(rtt));
 }
+
+public class BatchTests
+{
+    [Fact]
+    public void Batch_KeepsFramesAndOrder()
+    {
+        var frames = new[] { Frame.MouseMove(3, -4), Frame.Key(0x41, 0x1E, false, false), Frame.MouseMove(-1, 2), Frame.Ping(123456789) };
+        var batch = Frame.Batch(frames.Select(f => f.Encode()).ToList());
+        Assert.True(Frame.TryDecode(batch.Encode(), out var back));
+        Assert.Equal(FrameType.Batch, back.Type);
+        var inner = Frame.Unbatch(back).ToList();
+        Assert.Equal(frames.Length, inner.Count);
+        for (int i = 0; i < frames.Length; i++)
+        {
+            Assert.True(Frame.TryDecode(inner[i], out var g));
+            Assert.Equal(frames[i].Type, g.Type);
+            Assert.Equal(frames[i].Payload, g.Payload);
+        }
+    }
+
+    [Fact]
+    public void Unbatch_StopsAtATruncatedFrame()
+    {
+        var ok = Frame.MouseMove(1, 1).Encode();
+        var p = new byte[2 + ok.Length + 2 + 1];
+        p[0] = (byte)ok.Length; ok.CopyTo(p, 2);
+        p[2 + ok.Length] = 50;   // claims 50 bytes, has 1
+        Assert.Single(Frame.Unbatch(new Frame(FrameType.Batch, p)));
+    }
+}

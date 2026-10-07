@@ -37,6 +37,7 @@ public enum FrameType : byte
     ClipboardImage = 27, // id(1) index(u16) total(u16) + a chunk of a PNG or JPEG: the clipboard's picture (a screenshot), best effort
     MirrorStop = 28,     // id(1): the viewer closed the mirror's window; the source stops that mirror
     MirrorResize = 29,   // id(1) w(u16) h(u16): the viewer resized the mirror's window; the source resizes its window to match
+    Batch = 30,          // { len(u16) + an encoded frame }...: several frames in one packet, applied in order
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -61,6 +62,35 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
     public ushort U16(int offset) => BinaryPrimitives.ReadUInt16LittleEndian(Payload.AsSpan(offset));
     public int I32(int offset) => BinaryPrimitives.ReadInt32LittleEndian(Payload.AsSpan(offset));
     public uint U32(int offset) => BinaryPrimitives.ReadUInt32LittleEndian(Payload.AsSpan(offset));
+
+    /// <summary>Several encoded frames in one: each goes as its length (u16) and its bytes. A Bluetooth packet
+    /// holds up to ~500 bytes and a frame is 25-45, so packing what is waiting into one packet carries several
+    /// times as much over a link limited in packets per second (RS -> LU, 2026-10-07: about 25).</summary>
+    public static Frame Batch(IReadOnlyList<byte[]> encoded)
+    {
+        var p = new byte[encoded.Sum(e => 2 + e.Length)];
+        int o = 0;
+        foreach (var e in encoded)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(o), (ushort)e.Length);
+            e.CopyTo(p, o + 2);
+            o += 2 + e.Length;
+        }
+        return new(FrameType.Batch, p);
+    }
+
+    /// <summary>The encoded frames inside a Batch, in order; stops at the first malformed length.</summary>
+    public static IEnumerable<byte[]> Unbatch(Frame batch)
+    {
+        int o = 0;
+        while (o + 2 <= batch.Payload.Length)
+        {
+            int len = BinaryPrimitives.ReadUInt16LittleEndian(batch.Payload.AsSpan(o));
+            if (len == 0 || o + 2 + len > batch.Payload.Length) yield break;
+            yield return batch.Payload.AsSpan(o + 2, len).ToArray();
+            o += 2 + len;
+        }
+    }
 
     public static Frame Ack(uint seq)
     {

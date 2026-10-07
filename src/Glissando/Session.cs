@@ -160,7 +160,15 @@ public sealed class Session : IDisposable
     // driving lags? Glissando's own queue growing means SendAsync is slow (the stack makes us wait); a short
     // queue with fast sends and a long round trip means the stack takes packets faster than the radio sends
     // them (2026-10-06: RS -> LU lagged up to 3.5 s whichever PC was central).
-    private int _stMoves, _stKeys, _stOther, _stFailed, _stMaxQueued, _stBytes;
+    private int _stMoves, _stKeys, _stOther, _stFailed, _stMaxQueued, _stBytes, _stPackets, _stBatched;
+
+    private void CountSent(FrameType t) { lock (_relGate) CountSentLocked(t); }
+    private void CountSentLocked(FrameType t)
+    {
+        if (t == FrameType.MouseMove) _stMoves++;
+        else if (t is FrameType.Key or FrameType.TypedKey or FrameType.MouseButton) _stKeys++;
+        else _stOther++;
+    }
     private double _stSendMs, _stMaxSendMs;
     private long _stSince = Stopwatch.GetTimestamp();
     // The receiving side of the same question: how long does applying a frame take here (decrypting it and,
@@ -650,8 +658,28 @@ public sealed class Session : IDisposable
         }
         if (!Frame.TryDecode(plain, out var f)) return;
         _lastPeer = Stopwatch.GetTimestamp();
+        if (f.Type == FrameType.Batch)
+        {
+            foreach (var inner in Frame.Unbatch(f))
+                if (Frame.TryDecode(inner, out var g) && g.Type != FrameType.Batch && !IsDuplicate(g)) HandleApp(g);
+            return;
+        }
         if (IsDuplicate(f)) return; // a redundant copy of a key/button/control frame already applied
         HandleApp(f);
+    }
+
+    // Frames packed into one packet at most this big (plaintext); the link's packets hold ~500 bytes.
+    private const int BatchLimit = 400;
+
+    /// <summary>Whether the other PC unpacks Batch frames: builds from 0.3.108 on. An older one would drop the
+    /// whole packet as an unknown frame type, so it gets one frame per packet as before.</summary>
+    private bool PeerTakesBatches
+    {
+        get
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(PeerVersion ?? "", @"^0\.3\.(\d+)");
+            return m.Success && int.Parse(m.Groups[1].Value) >= 108;
+        }
     }
 
     /// <summary>Acts on a received frame.</summary>
@@ -992,7 +1020,41 @@ public sealed class Session : IDisposable
                         double since = (Stopwatch.GetTimestamp() - _lastSend) * 1000.0 / Stopwatch.Frequency;
                         if (since < floorMs) await Task.Delay(floorMs - (int)since, _cts.Token);
                     }
-                    var packet = crypto.Seal(f.Encode());
+                    // Pack whatever else is waiting into the same packet, in order (consecutive moves merged), up
+                    // to BatchLimit: keys, their copies and the control frames ride along instead of each
+                    // taking a packet of their own on a link that carries only so many per second.
+                    byte[] plain = f.Encode();
+                    int batched = 0;
+                    if (PeerTakesBatches && plain.Length + 2 < BatchLimit)
+                    {
+                        var parts = new List<byte[]> { plain };
+                        int size = 2 + plain.Length;
+                        bool lastIsMove = f.Type == FrameType.MouseMove;
+                        int mdx = lastIsMove ? f.I16(0) : 0, mdy = lastIsMove ? f.I16(2) : 0;
+                        while (reader.TryPeek(out var next))
+                        {
+                            if (next.Type == FrameType.MouseMove && lastIsMove)
+                            {
+                                if (!reader.TryRead(out next)) break;
+                                Interlocked.Decrement(ref _queued);
+                                mdx += next.I16(0); mdy += next.I16(2);
+                                parts[^1] = Frame.MouseMove(mdx, mdy).Encode();
+                                continue;
+                            }
+                            var enc = next.Encode();
+                            if (size + 2 + enc.Length > BatchLimit) break;
+                            if (!reader.TryRead(out next)) break;
+                            Interlocked.Decrement(ref _queued);
+                            parts.Add(enc);
+                            size += 2 + enc.Length;
+                            lastIsMove = next.Type == FrameType.MouseMove;
+                            if (lastIsMove) { mdx = next.I16(0); mdy = next.I16(2); _lastMoveSend = Stopwatch.GetTimestamp(); }
+                            CountSent(next.Type);
+                            batched++;
+                        }
+                        if (parts.Count > 1) plain = Frame.Batch(parts).Encode();
+                    }
+                    var packet = crypto.Seal(plain);
                     _lastSend = Stopwatch.GetTimestamp();
                     int q = Volatile.Read(ref _queued);
                     bool ok = await _channel.SendAsync(packet);
@@ -1001,9 +1063,9 @@ public sealed class Session : IDisposable
                     double ms = (done - _lastSend) * 1000.0 / Stopwatch.Frequency;
                     lock (_relGate)
                     {
-                        if (f.Type == FrameType.MouseMove) _stMoves++;
-                        else if (f.Type is FrameType.Key or FrameType.TypedKey or FrameType.MouseButton) _stKeys++;
-                        else _stOther++;
+                        CountSentLocked(f.Type);
+                        _stPackets++;
+                        _stBatched += batched;
                         if (!ok) _stFailed++;
                         _stBytes += packet.Length;
                         _stSendMs += ms;
@@ -1043,8 +1105,8 @@ public sealed class Session : IDisposable
                         Interlocked.Exchange(ref UiLagMaxMs, 0);
                         _rxN = _rxSlow = 0; _rxMs = _rxMaxMs = 0;
                         if (_capture.Remote && n > 0)
-                            Log.Info($"tx while controlling: {n / secs:F0} packets/s ({_stMoves} moves, {_stKeys} keys/buttons, {_stOther} other, {_stFailed} failed), {_stBytes / secs / 1024:F1} kB/s; send {_stSendMs / n:F1} ms avg, {_stMaxSendMs:F0} ms max; queue max {_stMaxQueued}; move gap {MovePacing.GapMs(RttMs)} ms at rtt {RttMs:F0}");
-                        _stMoves = _stKeys = _stOther = _stFailed = _stMaxQueued = _stBytes = 0;
+                            Log.Info($"tx while controlling: {_stPackets / secs:F0} packets/s carrying {n / secs:F0} frames/s ({_stMoves} moves, {_stKeys} keys/buttons, {_stOther} other; {_stBatched} rode along in batches; {_stFailed} failed), {_stBytes / secs / 1024:F1} kB/s; send {_stSendMs / n:F1} ms avg, {_stMaxSendMs:F0} ms max; queue max {_stMaxQueued}; move gap {MovePacing.GapMs(RttMs)} ms at rtt {RttMs:F0}");
+                        _stMoves = _stKeys = _stOther = _stFailed = _stMaxQueued = _stBytes = _stPackets = _stBatched = 0;
                         _stSendMs = _stMaxSendMs = 0;
                         _stSince = now;
                     }
