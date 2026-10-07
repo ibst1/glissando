@@ -39,11 +39,67 @@ public sealed class InputInjector
     private readonly Dictionary<(ushort vk, ushort scan, bool ext), long> _keyDownAt = [];
     private readonly System.Threading.Timer _staleTimer;
 
+    // ---- smoothing --------------------------------------------------------------------------------------
+    // The sender coalesces moves and sends them 8-60 ms apart (MovePacing), so the link is not flooded. Applied
+    // as they come, each packet was one jump: 30 jumps a second on a slower link, a visibly choppy pointer both
+    // ways (2026-10-07). Instead a packet's movement is spread over the time until the next one is expected
+    // (the measured packet interval, at most MaxSpreadMs), in steps of about StepMs, by a thread of its own.
+    // Same packets on the link, a gliding pointer, and at most one packet interval of added delay. Small steps
+    // also get Windows' pointer acceleration closer to what the mouse itself would have got than one big
+    // coalesced jump did. Packets closer than DirectBelowMs are applied at once, as before.
+    private const int StepMs = 4, MaxSpreadMs = 40, DirectBelowMs = 6;
+    private double _pendX, _pendY;          // movement received but not yet injected
+    private long _drainBy;                  // Stopwatch time by which the pending movement should be out
+    private long _lastMoveAt;
+    private double _intervalMs = 8;         // running estimate of the time between move packets
+    private readonly AutoResetEvent _smoothWake = new(false);
+
+    /// <summary>The running estimate of the time between move packets, for the log.</summary>
+    public double MoveIntervalMs => _intervalMs;
+
     public InputInjector(Layout layout)
     {
         Layout = layout;
         _screen = Layout.MyVirtualScreen();
         _staleTimer = new System.Threading.Timer(_ => ReleaseStaleModifiers(), null, 1000, 1000);
+        new Thread(SmoothLoop) { IsBackground = true, Name = "move-smoother", Priority = ThreadPriority.AboveNormal }.Start();
+    }
+
+    private void SmoothLoop()
+    {
+        while (true)
+        {
+            bool more;
+            lock (_gate) more = StepPending();
+            if (more) Thread.Sleep(StepMs);   // 1 ms timer resolution is set for the process (Program)
+            else _smoothWake.WaitOne();
+        }
+    }
+
+    /// <summary>Inject the share of the pending movement due by now; true while some is left. Under _gate.</summary>
+    private bool StepPending()
+    {
+        if (!Active) { _pendX = _pendY = 0; return false; }
+        if (Math.Abs(_pendX) < 1 && Math.Abs(_pendY) < 1) return false;
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        double left = (_drainBy - now) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        double share = left <= StepMs ? 1 : StepMs / left;
+        int ix = (int)(_pendX * share), iy = (int)(_pendY * share);
+        if (share >= 1) { ix = (int)Math.Round(_pendX); iy = (int)Math.Round(_pendY); }
+        if (ix == 0 && iy == 0) return true;   // less than a pixel due yet: wait for the next step
+        _pendX -= ix; _pendY -= iy;
+        if (share >= 1) _pendX = _pendY = 0;
+        InjectMove(ix, iy);
+        return Math.Abs(_pendX) >= 1 || Math.Abs(_pendY) >= 1;
+    }
+
+    /// <summary>Put out all pending movement at once: before a click or a wheel turn, so it lands where the
+    /// pointer was going. Under _gate.</summary>
+    private void FlushPending()
+    {
+        int ix = (int)Math.Round(_pendX), iy = (int)Math.Round(_pendY);
+        _pendX = _pendY = 0;
+        if (Active && (ix != 0 || iy != 0)) InjectMove(ix, iy);
     }
 
     private void ReleaseStaleModifiers()
@@ -93,8 +149,9 @@ public sealed class InputInjector
                 case FrameType.Enter: if (f.ReadCrossing() is Crossing c) Enter(c); break;
                 case FrameType.Leave: ReleaseAll(); SetActive(false); break;
                 case FrameType.MouseMove: Move(f.I16(0), f.I16(2)); break;
-                case FrameType.MouseButton: Button(f.Payload[0], f.Payload[1] != 0); break;
+                case FrameType.MouseButton: FlushPending(); Button(f.Payload[0], f.Payload[1] != 0); break;
                 case FrameType.MouseWheel:
+                    FlushPending();
                     Native.Send(Native.Mouse(f.Payload[2] != 0 ? Native.MOUSEEVENTF_HWHEEL : Native.MOUSEEVENTF_WHEEL, data: unchecked((uint)(int)f.I16(0))));
                     break;
                 case FrameType.Key: Key(f.U16(0), f.U16(2), (f.Payload[4] & 1) != 0, (f.Payload[4] & 2) != 0); break;
@@ -116,6 +173,7 @@ public sealed class InputInjector
 
     private void Enter(Crossing c)
     {
+        _pendX = _pendY = 0;
         LastInputTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         _screen = Layout.MyVirtualScreen();
         // Land a few pixels inside the edge; crossing back needs a real push toward it, not jitter.
@@ -130,6 +188,20 @@ public sealed class InputInjector
     private void Move(int dx, int dy)
     {
         if (!Active) return;
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        double gap = (now - _lastMoveAt) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        _lastMoveAt = now;
+        if (gap < 100) _intervalMs = _intervalMs * 0.7 + Math.Clamp(gap, 1, MaxSpreadMs) * 0.3;   // not across a pause
+        double spread = Math.Min(_intervalMs, MaxSpreadMs);
+        _pendX += dx; _pendY += dy;
+        if (spread < DirectBelowMs) { FlushPending(); return; }
+        _drainBy = now + (long)(spread * System.Diagnostics.Stopwatch.Frequency / 1000);
+        _smoothWake.Set();
+    }
+
+    /// <summary>One relative step of the pointer, and the check for an edge that leads back.</summary>
+    private void InjectMove(int dx, int dy)
+    {
         Native.Send(Native.Mouse(Native.MOUSEEVENTF_MOVE, dx, dy));
         if (!Native.GetCursorPos(out var cur)) return;
         var p = new Point(cur.X - _screen.X, cur.Y - _screen.Y);
@@ -140,6 +212,7 @@ public sealed class InputInjector
             return;
         }
         if (Layout.FindCrossing(p, dx, dy) is not Crossing back) return;
+        _pendX = _pendY = 0;   // the rest of this movement belongs to the other PC now
         ReleaseAll();
         _returnArmed = false;
         SetActive(false);

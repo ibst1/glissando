@@ -1039,7 +1039,7 @@ public sealed class Session : IDisposable
                         double secs = (now - _stSince) / (double)Stopwatch.Frequency;
                         var (calls, sendAvg, sendMax) = Native.TakeSendStats();
                         if (_injector.Active && _rxN > 0)
-                            Log.Info($"rx while controlled: {_rxN / secs:F0} frames/s; applying {_rxMs / _rxN:F1} ms avg, {_rxMaxMs:F0} ms max, {_rxSlow} over 50 ms; SendInput {calls}x {sendAvg:F1} ms avg {sendMax:F0} ms max; UI thread lag max {Volatile.Read(ref UiLagMaxMs)} ms; rtt {RttMs:F0}");
+                            Log.Info($"rx while controlled: {_rxN / secs:F0} frames/s; applying {_rxMs / _rxN:F1} ms avg, {_rxMaxMs:F0} ms max, {_rxSlow} over 50 ms; SendInput {calls}x {sendAvg:F1} ms avg {sendMax:F0} ms max; moves every {_injector.MoveIntervalMs:F0} ms, smoothed; UI thread lag max {Volatile.Read(ref UiLagMaxMs)} ms; rtt {RttMs:F0}");
                         Interlocked.Exchange(ref UiLagMaxMs, 0);
                         _rxN = _rxSlow = 0; _rxMs = _rxMaxMs = 0;
                         if (_capture.Remote && n > 0)
