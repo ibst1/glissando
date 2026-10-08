@@ -129,6 +129,23 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _trayCheck.Tick += (_, _) => CheckTrayIcon();
         StartTrayCheck();
         InstanceSignals.Listen(onExit: () => _window.BeginInvoke(Exit), onSetup: () => _window.BeginInvoke(OpenSettings));
+        // A passphrase from before the strong generator still works, but a recording of the radio traffic is
+        // enough to guess it (see Passphrases). Say so once per start; the balloon opens the settings.
+        if (!Passphrases.IsStrong(settings.Passphrase))
+        {
+            Log.Warn("the passphrase is weak; generate a new one in the settings");
+            var once = new System.Windows.Forms.Timer { Interval = 5000 };
+            once.Tick += (_, _) =>
+            {
+                once.Dispose();
+                _weakPassBalloon = true;
+                _tray.ShowBalloonTip(20000, "Glissando: weak passphrase",
+                    "Someone nearby who records the Bluetooth traffic could work it out. Click here, then Generate, and type the new code on the other PC.", ToolTipIcon.Warning);
+            };
+            once.Start();
+            _tray.BalloonTipClicked += (_, _) => { if (_weakPassBalloon) OpenSettings(); };
+            _tray.BalloonTipClosed += (_, _) => _weakPassBalloon = false;
+        }
 
         var layout = Layout.FromSettings(settings);
         _capture = new InputCapture(layout, _window.Handle);
@@ -180,6 +197,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     }
 
     private bool _versionWarned;
+    private bool _weakPassBalloon; // the balloon on screen is the weak-passphrase one: a click opens the settings
 
     // ---- tray icon watchdog ----
 

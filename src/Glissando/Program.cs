@@ -173,6 +173,8 @@ internal static class Program
           --settings  settings file (default %APPDATA%\Glissando\settings.json)
           --console   show a console window with the log
           --mirror-test [title]  measure a window's mirroring data rate (foreground if no title)
+          --keylog    write every key sent or received to the log, to trace lost keys. The log is plain text:
+                      passwords typed meanwhile end up in it, so use it briefly and delete the log afterwards
 
         Command-line values override the settings file for this run only.
         """;

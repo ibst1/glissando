@@ -193,8 +193,23 @@ balloon says what to do.
 Every frame is AES-256-GCM encrypted with a key derived from the passphrase
 (PBKDF2, 200 000 rounds). Frame counters start from the clock and must
 increase, so replayed frames are dropped, and each side proves it holds the
-key with a nonce handshake before any input is accepted. The passphrase is
-stored in plain text in `settings.json`; treat that file accordingly.
+key with a nonce handshake before any input is accepted.
+
+The Bluetooth link itself is unpaired and unencrypted, so the passphrase is
+the only protection: anyone in radio range can record the traffic and try
+passphrases against it offline. **Generate** gives 24 random characters
+(120 bits), far beyond such a search; case and dashes do not matter when you
+type it on the other PC. A passphrase of your own must be at least 20
+characters. Passphrases from builds before 0.3.110 (four instrument words
+and a number) are weak: they still work, but the tray and the setup dialog
+ask you to replace them.
+
+The passphrase is stored in `settings.json` encrypted with Windows DPAPI, so
+only your Windows account on that PC can read it. A settings file copied to
+another PC or user loses the passphrase, and the setup dialog asks for it.
+
+`--keylog` writes every key to the plain-text log, passwords included. It is
+for tracing lost keys only; delete the log afterwards.
 
 ## How it works
 

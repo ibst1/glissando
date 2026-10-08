@@ -504,6 +504,66 @@ public sealed class Crypto : IDisposable
 }
 
 /// <summary>
+/// The passphrase is the only thing between a stranger with a BLE sniffer and every key typed across the link:
+/// the GATT link itself is unpaired and unencrypted, so anyone in radio range can record the packets and try
+/// passphrases offline against a recorded Hello. A generated one is 24 random Crockford base32 characters
+/// (120 bits), out of reach of any such search. The old generator's four words from sixteen plus a number gave
+/// about 26 bits, which a GPU gets through in minutes; those still work but count as weak.
+/// </summary>
+public static class Passphrases
+{
+    private const string Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford: no I, L, O, U
+    private const int Chars = 24, Group = 4;
+
+    /// <summary>A passphrase made up by hand must be at least this long.</summary>
+    public const int MinCustomLength = 20;
+
+    public static string Generate()
+    {
+        Span<char> c = stackalloc char[Chars];
+        for (int i = 0; i < Chars; i++) c[i] = Alphabet[RandomNumberGenerator.GetInt32(Alphabet.Length)];
+        return Format(c);
+    }
+
+    /// <summary>A generated code typed by hand comes back in its canonical form whatever the case, spacing or
+    /// dashes, and with the letters Crockford reads as digits (O as 0, I and L as 1). Anything else is returned
+    /// trimmed but otherwise as typed, so an existing passphrase keeps deriving the same key.</summary>
+    public static string Normalize(string typed)
+    {
+        typed = typed.Trim();
+        var c = new List<char>(Chars);
+        foreach (var ch in typed.ToUpperInvariant())
+        {
+            if (ch is '-' or ' ' or '\t') continue;
+            char d = ch switch { 'O' => '0', 'I' or 'L' => '1', _ => ch };
+            if (Alphabet.IndexOf(d) < 0) return typed;
+            c.Add(d);
+        }
+        return c.Count == Chars ? Format(c.ToArray()) : typed;
+    }
+
+    public static bool IsGenerated(string p) => p.Length == Chars + Chars / Group - 1 && Normalize(p) == p;
+
+    /// <summary>Generated, or long enough that guessing it offline is not practical. One from the old generator
+    /// is long enough yet holds only ~26 bits, so it is recognised by its shape.</summary>
+    public static bool IsStrong(string p) => IsGenerated(p) || (p.Length >= MinCustomLength && !OldGenerated.IsMatch(p));
+
+    private static readonly System.Text.RegularExpressions.Regex OldGenerated =
+        new(@"^((cello|viola|oboe|harp|flute|tuba|lute|horn|drum|fife|bell|reed|organ|gong|lyre|pipe)-){4}\d{3}$");
+
+    private static string Format(ReadOnlySpan<char> c)
+    {
+        var sb = new StringBuilder(Chars + Chars / Group);
+        for (int i = 0; i < c.Length; i++)
+        {
+            if (i > 0 && i % Group == 0) sb.Append('-');
+            sb.Append(c[i]);
+        }
+        return sb.ToString();
+    }
+}
+
+/// <summary>
 /// How often mouse moves may go out. A BLE central's WriteWithoutResponse completes as soon as Windows has
 /// buffered the packet, not when the radio has sent it, so the send queue never looks backed up: a wired mouse
 /// reporting at 500-1000 Hz filled the stack's own buffer on 2026-10-05 and the round trip climbed to seconds,

@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Win32;
@@ -21,8 +23,42 @@ public sealed class SavedPlacement
 
 public sealed class Settings
 {
-    /// <summary>Shared secret; must be identical on both PCs. Frames are AES-GCM encrypted with a key derived from it.</summary>
+    /// <summary>Shared secret; must be identical on both PCs. Frames are AES-GCM encrypted with a key derived from it.
+    /// Kept in memory only; on disk it is <see cref="PassphraseProtected"/>.</summary>
+    [JsonIgnore]
     public string Passphrase { get; set; } = "";
+
+    /// <summary>The passphrase on disk, encrypted with Windows DPAPI for this user: anyone who can read the key
+    /// can read everything typed across the link, so it must not sit in the file as plain text. A file copied to
+    /// another user or PC cannot be decrypted there; the passphrase is then empty and the setup dialog asks for it.</summary>
+    public string PassphraseProtected
+    {
+        get => Passphrase == "" ? "" : Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(Passphrase), Entropy, DataProtectionScope.CurrentUser));
+        set
+        {
+            if (string.IsNullOrEmpty(value)) return;
+            try { Passphrase = Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(value), Entropy, DataProtectionScope.CurrentUser)); }
+            catch (Exception ex) when (ex is CryptographicException or FormatException)
+            {
+                Log.Warn("the saved passphrase cannot be decrypted here (settings from another user or PC?); it has to be entered again");
+            }
+        }
+    }
+
+    /// <summary>Settings from before PassphraseProtected kept the passphrase in plain text under this name. Read
+    /// once, never written: the next save stores it encrypted and drops the plain copy.</summary>
+    [JsonPropertyName("Passphrase")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PlainPassphrase
+    {
+        get => null;
+        set { if (!string.IsNullOrEmpty(value)) { Passphrase = value; HadPlainPassphrase = true; } }
+    }
+
+    [JsonIgnore]
+    internal bool HadPlainPassphrase { get; private set; }
+
+    private static readonly byte[] Entropy = Encoding.ASCII.GetBytes("Glissando passphrase");
 
     /// <summary>Which PC is the BLE peripheral. Auto: advertise if possible, and let the PC with the lower address connect.</summary>
     public BleMode Ble { get; set; } = BleMode.Auto;
@@ -178,6 +214,11 @@ public sealed class Settings
                 foreach (var k in s.Placements.Keys.Where(k => !Layout.IsCompleteSetupKey(k)).ToArray()) s.Placements.Remove(k);
                 s.KeepaliveMs = Math.Clamp(s.KeepaliveMs, 200, 10_000);
                 s.PeerTimeoutMs = Math.Clamp(s.PeerTimeoutMs, 1000, 60_000);
+                if (s.HadPlainPassphrase)
+                {
+                    try { s.Save(); Log.Info("settings: the passphrase is now stored encrypted"); }
+                    catch (Exception ex) { Log.Warn("settings: could not re-save with the passphrase encrypted: " + ex.Message); }
+                }
                 return s;
             }
         }

@@ -200,6 +200,8 @@ internal sealed class SettingsForm : Form
     private readonly bool _firstRun;
     private readonly string _peerName;
     private readonly TextBox _pass = new() { Width = 300 };
+    private readonly Label _passWarning = new() { AutoSize = true, MaximumSize = new Size(460, 0), ForeColor = Color.Firebrick, Margin = new Padding(0, 0, 0, 4) };
+    private string _originalPass = "";
     private readonly PlacementCanvas _canvas = new() { Dock = DockStyle.Fill };
     private readonly NumericUpDown _peerX = new() { Minimum = -30000, Maximum = 30000, Width = 80 };
     private readonly NumericUpDown _peerY = new() { Minimum = -30000, Maximum = 30000, Width = 80 };
@@ -315,11 +317,18 @@ internal sealed class SettingsForm : Form
         layout.Controls.Add(Header("2. Passphrase (type the same one on the other PC)"));
         var passRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 2, 0, 8) };
         _pass.Text = working.Passphrase;
+        _originalPass = working.Passphrase;
         var gen = new Button { Text = "Generate", AutoSize = true };
-        gen.Click += (_, _) => _pass.Text = GeneratePassphrase();
+        gen.Click += (_, _) => _pass.Text = Passphrases.Generate();
         passRow.Controls.Add(_pass);
         passRow.Controls.Add(gen);
         layout.Controls.Add(passRow);
+        _passWarning.Text = "This passphrase is weak: someone nearby who records the Bluetooth traffic could work it out and read what you type. "
+            + "Click Generate, save, and type the new one on the other PC.";
+        _pass.TextChanged += (_, _) => _passWarning.Visible = _pass.Text.Trim() != "" && !Passphrases.IsStrong(Passphrases.Normalize(_pass.Text));
+        _passWarning.Visible = working.Passphrase != "" && !Passphrases.IsStrong(working.Passphrase);
+        layout.Controls.Add(_passWarning);
+        layout.Controls.Add(Note($"Click Generate and type the same code on the other PC (case and dashes do not matter). A passphrase of your own must be at least {Passphrases.MinCustomLength} characters."));
 
         layout.Controls.Add(Header("3. Bluetooth role"));
         var bleRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 2, 0, 8) };
@@ -597,10 +606,12 @@ internal sealed class SettingsForm : Form
 
     private bool Commit()
     {
-        var pass = _pass.Text.Trim();
-        if (pass.Length < 4)
+        var pass = Passphrases.Normalize(_pass.Text);
+        // A weak passphrase already in use may stay until the user replaces it (the warning above says so):
+        // refusing it here would make every other setting unsaveable. A new one has to be strong.
+        if (pass == "" || (pass != _originalPass && !Passphrases.IsStrong(pass)))
         {
-            MessageBox.Show(this, "Enter a passphrase of at least 4 characters, or click Generate.", "Glissando", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, $"Click Generate, or enter a passphrase of at least {Passphrases.MinCustomLength} characters.", "Glissando", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             _pass.Focus();
             return false;
         }
@@ -640,13 +651,6 @@ internal sealed class SettingsForm : Form
         {
             _btInfo.Text = "Could not read the Bluetooth adapter: " + ex.Message;
         }
-    }
-
-    private static string GeneratePassphrase()
-    {
-        string[] words = ["cello", "viola", "oboe", "harp", "flute", "tuba", "lute", "horn", "drum", "fife", "bell", "reed", "organ", "gong", "lyre", "pipe"];
-        var r = Random.Shared;
-        return string.Join("-", Enumerable.Range(0, 4).Select(_ => words[r.Next(words.Length)])) + "-" + r.Next(100, 999);
     }
 
     private static void TryStart(string target)
