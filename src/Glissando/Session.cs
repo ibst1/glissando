@@ -443,6 +443,16 @@ public sealed class Session : IDisposable
 
     public void Start()
     {
+        // Bluetooth switched off: say so (BluetoothProblem); switched on again: start the link over now, not
+        // after whatever backoff the failed attempts while it was off had built up.
+        Transport.BluetoothRadio.Changed += on =>
+        {
+            StateChanged?.Invoke();
+            if (!on) return;
+            Log.Info("Bluetooth radio back on: starting the link over");
+            try { _channel.Sleep(); _channel.Wake(); } catch (Exception ex) { Log.Warn("restart after radio on: " + ex.Message); }
+        };
+        _ = Transport.BluetoothRadio.StartAsync();
         Transport.BleHealth.Changed += () => { if (Authenticated) SendStatus(); StateChanged?.Invoke(); };
         ReconcilePlacement("start");
         _channel.Received += OnReceived;
@@ -1364,6 +1374,7 @@ public sealed class Session : IDisposable
     {
         get
         {
+            if (Transport.BluetoothRadio.IsOn == false) return "Bluetooth is switched off on this PC: switch it on";
             var mine = Transport.BleHealth.Current;
             if (mine == Transport.BleHealth.Verdict.RestartWindows) return "Bluetooth on this PC is stuck: restart Windows on this PC";
             if (mine == Transport.BleHealth.Verdict.ToggleBluetooth) return "Bluetooth on this PC is not responding: turn Bluetooth off and on";

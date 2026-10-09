@@ -428,7 +428,8 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         // which also runs our low-level input hooks; with the round trip in the tip it changed with nearly every
         // state change. So: no round trip in the tip (it is in the menu's status line), and no call unless
         // something actually changed.
-        string tipText = problem.Contains("restart Windows") ? Trim(tip, 40) + " - BLUETOOTH STUCK"
+        string tipText = problem.Contains("switched off") ? Trim(tip, 44) + " - BLUETOOTH OFF"
+            : problem.Contains("restart Windows") ? Trim(tip, 40) + " - BLUETOOTH STUCK"
             : problem != "" ? Trim(tip, 42) + " - Bluetooth not answering" : Trim(tip, 63);
         var icon = _session.TransportStatus.StartsWith("BLE error") || problem != "" ? _iconError
             : _session.Controlling ? _iconControlling
@@ -443,7 +444,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private void ShowBluetoothBalloon(string problem)
     {
         if (problem == "") return;
-        string detail = problem.Contains("restart Windows")
+        string detail = problem.Contains("switched off")
+            ? "Turn Bluetooth on in the quick settings or Settings > Bluetooth & devices (check that airplane mode is off). Glissando links up by itself once it is on."
+            : problem.Contains("restart Windows")
             ? "Windows' Bluetooth has been stuck for minutes; turning it off and on does not cure this. Glissando reconnects by itself after the restart."
             : "Windows' Bluetooth stopped answering (it happens after sleep). Turn it off and on in Settings > Bluetooth & devices; Glissando reconnects by itself. If it keeps happening, restart Windows.";
         _tray.ShowBalloonTip(20000, "Glissando: " + problem, detail, ToolTipIcon.Warning);
