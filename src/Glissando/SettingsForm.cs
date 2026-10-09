@@ -219,7 +219,9 @@ internal sealed class SettingsForm : Form
     private readonly TextBox _deskName = new() { Width = 150 };
     private readonly ToolTip _tips = new();
     private readonly Label _deskStatus = new() { AutoSize = true, MaximumSize = new Size(460, 0), Margin = new Padding(0, 4, 0, 0) };
-    private readonly Point _originalOrigin;
+    // The placement as it stood when the dialog opened, or as Glissando itself last set it while the dialog was
+    // open (Reload): anything else on the canvas at Save is the user's edit, and only that gets a new timestamp.
+    private Point _originalOrigin;
     private bool _syncing;
 
     // Text width for wrapped option labels and notes: the tab page minus padding, at 100 % scaling (the
@@ -579,6 +581,10 @@ internal sealed class SettingsForm : Form
         if (!string.IsNullOrEmpty(peerName)) _canvas.OtherName = peerName;
         if (now.PeerOrigin != _originalOrigin)
         {
+            // Not an edit of the user's: a desk recalled when the other PC said hello, or its newer placement.
+            // Counted as one, a Save for something else (a new passphrase on RS, 2026-10-09 05:27) stamped it
+            // as just edited, sent it over as the newest, and it replaced the desk's placement on both PCs.
+            _originalOrigin = now.PeerOrigin;
             _canvas.PeerOrigin = now.PeerOrigin;
             SyncFromCanvas();
         }
