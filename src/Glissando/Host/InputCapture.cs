@@ -290,6 +290,8 @@ public sealed class InputCapture : IDisposable
         bool ext = (info.flags & Native.LLKHF_EXTENDED) != 0;
         // The left Ctrl as the KEYBOARD holds it, in every mode: only a physical press counts for our hotkeys.
         if (info.vkCode == Native.VK_LCONTROL && (info.flags & Native.LLKHF_INJECTED) == 0) _physLCtrl = !up;
+        if ((info.flags & Native.LLKHF_INJECTED) == 0)
+            lock (_physDown) { if (up) _physDown.Remove(info.vkCode); else _physDown[info.vkCode] = Stopwatch.GetTimestamp(); }
 
         if (!Remote)
         {
@@ -388,6 +390,22 @@ public sealed class InputCapture : IDisposable
     // Ctrl+Alt+J (2026-10-07). A left Ctrl a program injects never counts, and a right Ctrl held (by the user
     // or by such a remapper) rules our hotkeys out.
     private volatile bool _physLCtrl;
+
+    // Every key this PC's own keyboard holds (not injected), whatever mode we are in, with when it last went down
+    // or auto-repeated. The injector asks it before releasing a modifier nobody accounts for: a key the user
+    // really holds here must never be let go. Not checked against Windows, which reads a key we swallow as up;
+    // instead a held key repeats many times a second, so one silent for PhysHeldMs had its up lost (the secure
+    // desktop of Win+L eats it) and no longer counts.
+    private readonly Dictionary<uint, long> _physDown = [];
+    private const int PhysHeldMs = 2000;
+
+    /// <summary>True while any key of this PC's own keyboard is held.</summary>
+    public bool AnyPhysicalKeyDown()
+    {
+        long now = Stopwatch.GetTimestamp();
+        lock (_physDown)
+            return _physDown.Values.Any(t => now - t < Stopwatch.Frequency * PhysHeldMs / 1000);
+    }
 
     private bool RCtrlHeld()
     {

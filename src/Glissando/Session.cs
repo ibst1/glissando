@@ -256,6 +256,7 @@ public sealed class Session : IDisposable
         _channel = channel;
         _capture = capture;
         _injector = injector;
+        _injector.AnyPhysicalKeyDown = capture.AnyPhysicalKeyDown;
         _clipboard = clipboard;
         // Do not start controlling while the peer is still feeding us injected moves: right after it hands
         // control back, its trailing moves land on our return edge, and reading that injected cursor as our

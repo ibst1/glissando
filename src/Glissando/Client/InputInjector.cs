@@ -39,6 +39,25 @@ public sealed class InputInjector
     private readonly Dictionary<(ushort vk, ushort scan, bool ext), long> _keyDownAt = [];
     private readonly System.Threading.Timer _staleTimer;
 
+    // ---- orphaned modifiers ------------------------------------------------------------------------------
+    // A modifier Windows holds down that nobody accounts for: not one we injected and still track, not one this
+    // PC's own keyboard holds. A remapper here can produce one from keys we injected (Sostenuto turns an injected
+    // CapsLock into a held right Ctrl) and then lose track of it; Ctrl stayed down on LU with nothing in our own
+    // set to release (2026-10-09). Checked shortly after control ends, and every second: one that persists for
+    // StaleModifierMs while no key at all is held, here or by the peer, is released and logged.
+    private static readonly (ushort vk, bool ext, string name)[] SidedModifiers =
+    [
+        (Native.VK_LSHIFT, false, "LShift"), (Native.VK_RSHIFT, true, "RShift"),
+        (Native.VK_LCONTROL, false, "LCtrl"), (Native.VK_RCONTROL, true, "RCtrl"),
+        (Native.VK_LMENU, false, "LAlt"), (Native.VK_RMENU, true, "RAlt"),
+        (Native.VK_LWIN, true, "LWin"), (Native.VK_RWIN, true, "RWin"),
+    ];
+    private readonly Dictionary<ushort, long> _orphanSince = [];
+    private const ushort VK_PACKET = 0xE7;
+
+    /// <summary>Whether this PC's own keyboard holds any key (InputCapture). Unset: assume it does, release nothing.</summary>
+    public Func<bool>? AnyPhysicalKeyDown;
+
     // ---- smoothing --------------------------------------------------------------------------------------
     // The sender coalesces moves and sends them 8-60 ms apart (MovePacing), so the link is not flooded. Applied
     // as they come, each packet was one jump: 30 jumps a second on a slower link, a visibly choppy pointer both
@@ -102,8 +121,47 @@ public sealed class InputInjector
         if (Active && (ix != 0 || iy != 0)) InjectMove(ix, iy);
     }
 
+    /// <summary>Release the modifiers Windows holds that nobody accounts for (see SidedModifiers). With
+    /// <paramref name="why"/> set, at once; otherwise only those that have been orphaned for StaleModifierMs.</summary>
+    private void ReleaseOrphanModifiers(string? why)
+    {
+        lock (_gate)
+        {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_keysDown.Count > 0 || (AnyPhysicalKeyDown?.Invoke() ?? true)) { _orphanSince.Clear(); return; }
+            var released = new List<string>();
+            foreach (var (vk, ext, name) in SidedModifiers)
+            {
+                if (!Native.IsDown(vk)) { _orphanSince.Remove(vk); continue; }
+                if (why == null)
+                {
+                    if (!_orphanSince.TryGetValue(vk, out long since)) { _orphanSince[vk] = now; continue; }
+                    if (now - since < System.Diagnostics.Stopwatch.Frequency * StaleModifierMs / 1000) continue;
+                }
+                _orphanSince.Remove(vk);
+                ReleaseModifier(vk, ext);
+                released.Add(name);
+            }
+            if (released.Count > 0)
+                Log.Info($"released {string.Join(", ", released)}: down in Windows, but neither injected by us nor held on this keyboard ({why ?? $"for {StaleModifierMs} ms"})");
+        }
+    }
+
+    /// <summary>Key-up of a modifier. Alt and Win get the unassigned vkE8 in between first, so a lone release
+    /// opens neither the menu bar nor the Start menu.</summary>
+    private static void ReleaseModifier(ushort vk, bool ext)
+    {
+        if (vk is Native.VK_LMENU or Native.VK_RMENU or Native.VK_LWIN or Native.VK_RWIN or 0x12)
+        {
+            SendKey(0xE8, 0, up: false, ext: false);
+            SendKey(0xE8, 0, up: true, ext: false);
+        }
+        SendKey(vk, 0, up: true, ext);
+    }
+
     private void ReleaseStaleModifiers()
     {
+        ReleaseOrphanModifiers(null);
         lock (_gate)
         {
             if (_keysDown.Count == 0) return;
@@ -261,6 +319,9 @@ public sealed class InputInjector
     internal static void SendKey(ushort vk, ushort scan, bool up, bool ext)
     {
         uint flags = up ? Native.KEYEVENTF_KEYUP : 0;
+        // VK_PACKET is not a key: its "scan code" is a UTF-16 character that a program on the other PC typed as
+        // text (SendText, Expanto's insert). Replayed as a virtual key it typed nothing.
+        if (vk == VK_PACKET) { Native.Send(Native.Keyboard(0, scan, flags | Native.KEYEVENTF_UNICODE)); return; }
         if (ext) flags |= Native.KEYEVENTF_EXTENDEDKEY;
         if (vk != 0)
             Native.Send(Native.Keyboard(vk, scan, flags));
@@ -273,13 +334,18 @@ public sealed class InputInjector
     {
         lock (_gate)
         {
+            if (_keysDown.Count > 0)
+                Log.Info($"released on leave: {string.Join(", ", _keysDown.Select(k => $"vk=0x{k.vk:X2}"))}");
             foreach (var k in _keysDown.ToArray())
-                SendKey(k.vk, k.scan, up: true, k.ext);
+                if (Native.IsModifierVk(k.vk)) ReleaseModifier(k.vk, k.ext); else SendKey(k.vk, k.scan, up: true, k.ext);
             _keysDown.Clear();
             _keyDownAt.Clear();
             foreach (var b in _buttonsDown.ToArray()) Button(b, false);
             _buttonsDown.Clear();
         }
+        // A remapper here gets a moment to let go of what it made from our keys (Sostenuto's right Ctrl for an
+        // injected CapsLock) before anything still down is taken for orphaned.
+        Task.Delay(500).ContinueWith(_ => { if (!Active) ReleaseOrphanModifiers("control ended"); });
     }
 
     public void Deactivate()
