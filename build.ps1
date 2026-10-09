@@ -4,7 +4,9 @@
 param(
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [switch]$FrameworkDependent
+    [switch]$FrameworkDependent,
+    # Leave Glissando stopped after the build instead of starting the new one.
+    [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +62,29 @@ function Copy-WithRetry([string]$from, [string]$to) {
     throw "could not copy $from to $to intact"
 }
 
+# Stop a Glissando running from the target folder first, and start the new one afterwards. A single-file
+# exe reads its parts from its own file only when they are first needed; an instance left running while
+# builds moved its file aside and then deleted it (the old Glissando.prev.exe) died at the next window it
+# opened: "FileNotFoundException: System.Collections.NonGeneric" (2026-10-09). --exit lets it put the
+# cursor and any hidden mirrored window back; only one that does not go within 10 s is killed.
+$running = @(Get-CimInstance Win32_Process -Filter "Name='Glissando.exe' OR Name='Glissando.prev.exe'" |
+    Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($target, [StringComparison]::OrdinalIgnoreCase) })
+if ($running.Count -gt 0) {
+    Write-Host "Stopping the running Glissando ($($running.Count)) before replacing it"
+    $exit = Join-Path $target "Glissando.exe"
+    if (Test-Path $exit) { try { Start-Process $exit -ArgumentList '--exit' -Wait } catch { } }
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline -and @($running | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }).Count -gt 0) {
+        Start-Sleep -Milliseconds 300
+    }
+    foreach ($p in $running) {
+        if (Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue) {
+            Write-Host "note: Glissando $($p.ProcessId) did not exit; killing it"
+            Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 # A running Glissando locks its exe, but a running exe may still be RENAMED: move it aside, so the instance
 # keeps running from the renamed file and the next start picks up the new one. A stump left by an earlier
 # failed publish is not worth keeping as the previous version; just delete it.
@@ -79,3 +104,7 @@ Get-ChildItem $stage -File | ForEach-Object { Copy-WithRetry $_.FullName (Join-P
 New-Item -ItemType Directory -Force $dist | Out-Null
 Copy-WithRetry $staged (Join-Path $dist "Glissando.exe")
 Write-Host "Published to $target and $dist"
+if ($running.Count -gt 0 -and -not $NoRestart) {
+    Start-Process (Join-Path $target "Glissando.exe")
+    Write-Host "Started the new Glissando"
+}
