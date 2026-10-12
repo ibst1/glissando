@@ -291,6 +291,17 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         string.Join(";", monitors.OrderBy(m => m.Bounds.Y).ThenBy(m => m.Bounds.X)
             .Select(m => $"{m.Bounds.X},{m.Bounds.Y},{m.Bounds.Width},{m.Bounds.Height}#{m.Number}@{m.Id}"));
 
+    /// <summary>A fingerprint of where a PC's monitors stand (bounds only; 0 = none known). A placement is relative
+    /// to the virtual-screen origin those bounds imply, so it means something only for the same fingerprint.</summary>
+    public static uint ViewHash(IEnumerable<MonitorRect> monitors)
+    {
+        var sig = string.Join(";", monitors.Select(m => m.Bounds).OrderBy(b => b.Y).ThenBy(b => b.X)
+            .Select(b => $"{b.X},{b.Y},{b.Width},{b.Height}"));
+        if (sig == "") return 0;
+        uint h = BitConverter.ToUInt32(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sig)), 0);
+        return h == 0 ? 1 : h;
+    }
+
     /// <summary>Identifies a desk: this PC's monitors, the other PC's name and its monitors. Placements are
     /// remembered per key (Settings.Placements). Before the other PC has said hello its part is empty, which
     /// is a key of its own; the real one takes over when the monitors arrive.</summary>
@@ -324,6 +335,35 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
             .ToArray();
         mine = Parse(parts[0]); peerName = parts[1]; peer = Parse(parts[2]);
         return mine.Length > 0;
+    }
+
+    /// <summary>The placement of one desk carried to the next when a screen arrangement changes (a dock pulled out,
+    /// a monitor unplugged): a panel on both sides of the change - the laptop's own, by EDID identity - stays where
+    /// it physically is, so the other PC keeps standing where it stood beside that panel. Null when a side changed
+    /// and no panel is shared to anchor it; the old placement then means nothing for the new desk.</summary>
+    public static Point? CarryPlacement(Point origin, string fromKey, string toKey)
+    {
+        if (!TryParseSetupKey(fromKey, out var oldMine, out var oldName, out var oldPeer)
+            || !TryParseSetupKey(toKey, out var newMine, out var newName, out var newPeer)
+            || oldName != newName || oldPeer.Length == 0 || newPeer.Length == 0) return null;
+        static Point? Shift(MonitorRect[] from, MonitorRect[] to)
+        {
+            if (MonitorSignature(from) == MonitorSignature(to)) return Point.Empty;
+            foreach (var n in to)
+            {
+                if (n.Id == "") continue;
+                foreach (var o in from)
+                    if (o.Id == n.Id && o.Bounds.Size == n.Bounds.Size) return new Point(n.Bounds.X - o.Bounds.X, n.Bounds.Y - o.Bounds.Y);
+            }
+            return null;
+        }
+        if (Shift(oldMine, newMine) is not Point dMine || Shift(oldPeer, newPeer) is not Point dPeer) return null;
+        // Our coordinates moved by dMine; the other PC's origin moved by dPeer within its own.
+        var carried = new Point(origin.X + dMine.X - dPeer.X, origin.Y + dMine.Y - dPeer.Y);
+        // Still touching and clear of our screens: keep it exactly. Otherwise (it stood beside a monitor that is
+        // gone) bring it to the nearest edge.
+        if (!Overlaps(newMine, newPeer, carried) && new Layout(newMine, newPeer, carried).CrossingSegments().Any()) return carried;
+        return Snap(newMine, newPeer, carried);
     }
 
     /// <summary>Two desks with the same physical screens on this PC and on the same other PC - the same panels

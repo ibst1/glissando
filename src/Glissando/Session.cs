@@ -191,6 +191,7 @@ public sealed class Session : IDisposable
     private string? _lastClipboardSent;
     private readonly Dictionary<byte, (byte total, byte[]?[] chunks)> _clipIn = [];
     private string _setupKey = "";
+    private uint _lastStaleView;
 
     /// <summary>The screen setup changed (start, displays added or removed, the peer's monitors arrived): bring
     /// in the placement remembered for it, or remember the current one for a setup seen for the first time.</summary>
@@ -211,6 +212,7 @@ public sealed class Session : IDisposable
             }
         }
         if (key == _setupKey) return;
+        var previous = _setupKey;
         _setupKey = key;
         if (_s.RecallPlacement(key, out bool changed))
         {
@@ -241,11 +243,28 @@ public sealed class Session : IDisposable
             }
             // Remember a new desk only with the other PC linked: without it its monitor list is the last desk's,
             // and the placement in use belongs to that desk too.
-            else if (_s.PeerX != null && Authenticated)
+            else if (_s.PeerX is int px && _s.PeerY is int py && Authenticated)
             {
+                // The placement in use belongs to the previous desk. Coming from a provisional key (the other PC's
+                // monitors just arrived) it is this desk's own; coming from another complete desk it is carried
+                // over by a screen the two share - or, with none, not filed at all: the docked placement stored
+                // as is under the laptop-alone desk put the other PC at a corner (2026-10-09).
+                Point? carried = Layout.IsCompleteSetupKey(previous) ? Layout.CarryPlacement(new Point(px, py), previous, key) : new Point(px, py);
+                if (carried is not Point c)
+                {
+                    Log.Info($"screen setup ({why}): new, and no screen in common with the previous desk; not remembering a placement for it - place the other PC on the Screens tab");
+                    return;
+                }
+                bool moved = c != new Point(px, py);
+                _s.PeerX = c.X; _s.PeerY = c.Y;
                 _s.RememberPlacement(key);
                 try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
-                Log.Info($"screen setup ({why}): new; remembering the current placement for it" + (matches.Length > 1 ? $" ({matches.Length} remembered desks have the same screens - pick one on the Desks tab)" : ""));
+                Log.Info($"screen setup ({why}): new; remembering " + (moved ? $"the placement carried over from the previous desk, other PC at ({c.X},{c.Y})" : "the current placement") + " for it"
+                    + (matches.Length > 1 ? $" ({matches.Length} remembered desks have the same screens - pick one on the Desks tab)" : ""));
+                if (!moved) return;
+                RebuildLayout();
+                SettingsChanged?.Invoke();
+                if (Linked) SendHello();
             }
         }
     }
@@ -605,7 +624,8 @@ public sealed class Session : IDisposable
         var layout = _capture.Layout;
         var hello = Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version,
             (ushort)(_udp?.LocalPort ?? 0), _udp != null ? UdpPixelLink.LocalAddresses() : null,
-            _s.Placements.TryGetValue(_setupKey, out var desk) ? desk.Name : "", _s.Placements.TryGetValue(_setupKey, out var desk2) ? desk2.NameUpdated : 0));
+            _s.Placements.TryGetValue(_setupKey, out var desk) ? desk.Name : "", _s.Placements.TryGetValue(_setupKey, out var desk2) ? desk2.NameUpdated : 0,
+            Layout.ViewHash(_s.OtherMonitorList)));
         // The monitor layout travels in Hello. A display or settings change mid-session sends one Hello, and on
         // this lossy link a single packet can be lost, leaving the peer with a stale arrangement -- the two
         // dialogs then disagree and a corner monitor becomes unreachable. Send a few copies so the update
@@ -889,6 +909,22 @@ public sealed class Session : IDisposable
         // The peer tells us where OUR origin sits in ITS pixels; ours is the mirror image.
         var theirView = new Point(-hello.PeerOrigin.X, -hello.PeerOrigin.Y);
         var myView = _capture.Layout.PeerOrigin;
+        // The peer may still be placed against this PC's previous screens (a dock pulled out, a monitor unplugged:
+        // our new monitors have not reached it yet). Its placement and desk name then belong to that other desk;
+        // adopting them filed the docked placement under the laptop-alone desk (2026-10-09). Wait for the hello
+        // that answers our new monitors.
+        uint myViewHash = Layout.ViewHash(Layout.MyMonitors());
+        if (hello.ReceiverView != 0 && hello.ReceiverView != myViewHash)
+        {
+            if (_lastStaleView != hello.ReceiverView)
+            {
+                _lastStaleView = hello.ReceiverView;
+                Log.Info($"{hello.Name} still places this PC by another screen arrangement; not adopting its placement or desk name");
+            }
+            if (changed) { RebuildLayout(); try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); } SettingsChanged?.Invoke(); }
+            return;
+        }
+        _lastStaleView = 0;
         bool newer = hello.PlacementUpdated > _s.PlacementUpdated;
         // Nobody has saved a placement yet and the two defaults disagree (both say "the other PC is to my
         // right"): let the PC with the greater name adopt the other's view, so the pair is at least consistent

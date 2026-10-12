@@ -130,22 +130,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         StartTrayCheck();
         InstanceSignals.Listen(onExit: () => _window.BeginInvoke(Exit), onSetup: () => _window.BeginInvoke(OpenSettings));
         // A passphrase from before the strong generator still works, but a recording of the radio traffic is
-        // enough to guess it (see Passphrases). Say so once per start; the balloon opens the settings.
+        // enough to guess it (see Passphrases). The settings dialog says so; a balloon at every start was a nag.
         if (!Passphrases.IsStrong(settings.Passphrase))
-        {
             Log.Warn("the passphrase is weak; generate a new one in the settings");
-            var once = new System.Windows.Forms.Timer { Interval = 5000 };
-            once.Tick += (_, _) =>
-            {
-                once.Dispose();
-                _weakPassBalloon = true;
-                _tray.ShowBalloonTip(20000, "Glissando: weak passphrase",
-                    "Someone nearby who records the Bluetooth traffic could work it out. Click here, then Generate, and type the new code on the other PC.", ToolTipIcon.Warning);
-            };
-            once.Start();
-            _tray.BalloonTipClicked += (_, _) => { if (_weakPassBalloon) OpenSettings(); };
-            _tray.BalloonTipClosed += (_, _) => _weakPassBalloon = false;
-        }
 
         var layout = Layout.FromSettings(settings);
         _capture = new InputCapture(layout, _window.Handle);
@@ -168,7 +155,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         };
 
         _session = new Session(settings, channel, _capture, _injector, this);
-        _session.StateChanged += () => _window.BeginInvoke(UpdateTray);
+        _session.StateChanged += () => _window.BeginInvoke(() => { UpdateTray(); _openForm?.SetPeerLinked(_session.Authenticated); });
         _session.SettingsChanged += () => _window.BeginInvoke(() => _openForm?.Reload(_settings, _session.PeerName));
         // Incoming window-mirroring frames arrive on the receive threads; the receiver reassembles and decodes
         // there and asks for the UI thread only to paint.
@@ -197,7 +184,6 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     }
 
     private bool _versionWarned;
-    private bool _weakPassBalloon; // the balloon on screen is the weak-passphrase one: a click opens the settings
 
     // ---- tray icon watchdog ----
 
@@ -409,7 +395,9 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         if (problem != _bluetoothShown)
         {
             _bluetoothShown = problem;
-            if (problem != "") ShowBluetoothBalloon(problem);
+            // Bluetooth switched off here (airplane mode, by hand) is the user's own doing: menu row and icon
+            // only, no balloon. The other cases are faults the user cannot see otherwise.
+            if (problem != "" && !problem.Contains("switched off")) ShowBluetoothBalloon(problem);
         }
         // Windows truncates a long tray tooltip on hover, so the tip is a short summary; the full multi-line
         // status lives in the first menu row (_status.Text above), which has no such limit.
@@ -459,6 +447,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         if (_openForm != null) { _openForm.Activate(); return; }
         var working = _settings.Clone();
         _openForm = new SettingsForm(working, firstRun: false, _session.PeerName);
+        _openForm.SetPeerLinked(_session.Authenticated);
         _openForm.Saved += Apply;
         _openForm.FormClosed += (_, _) => { _openForm.Dispose(); _openForm = null; };
         _openForm.Show();

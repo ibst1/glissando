@@ -212,6 +212,49 @@ public class LayoutTests
     }
 }
 
+public class CarryPlacementTests
+{
+    // RS at the clinic desk: two monitors above its own panel R; LU's panel L stands left of R, 16 px lower.
+    private static readonly MonitorRect[] RsDocked =
+    [
+        new(new Rectangle(0, 0, 1920, 1080), 2, "X"),
+        new(new Rectangle(1920, 16, 1920, 1080), 3, "Y"),
+        new(new Rectangle(0, 1080, 1920, 1200), 1, "R"),
+    ];
+    private static readonly MonitorRect[] RsAlone = [new(new Rectangle(0, 0, 1920, 1200), 1, "R")];
+    private static readonly MonitorRect[] Lu = [new(new Rectangle(0, 0, 1920, 1200), 1, "L")];
+
+    [Fact]
+    public void Undocking_KeepsTheOtherPcBesideTheSharedPanel()
+    {
+        // 2026-10-09: the docked placement was filed as is for RS alone, putting LU at a corner (-1920,1096).
+        var p = Layout.CarryPlacement(new Point(-1920, 1096), Layout.SetupKey(RsDocked, "LU", Lu), Layout.SetupKey(RsAlone, "LU", Lu));
+        Assert.Equal(new Point(-1920, 16), p);
+    }
+
+    [Fact]
+    public void TheOtherPc_CarriesTheMirrorImage()
+    {
+        var p = Layout.CarryPlacement(new Point(1920, -1096), Layout.SetupKey(Lu, "RS", RsDocked), Layout.SetupKey(Lu, "RS", RsAlone));
+        Assert.Equal(new Point(1920, -16), p);
+    }
+
+    [Fact]
+    public void NoPanelInCommon_CarriesNothing()
+    {
+        MonitorRect[] other = [new(new Rectangle(0, 0, 1920, 1200), 1, "Z")];
+        Assert.Null(Layout.CarryPlacement(new Point(-1920, 1096), Layout.SetupKey(RsDocked, "LU", Lu), Layout.SetupKey(other, "LU", Lu)));
+    }
+
+    [Fact]
+    public void ViewHash_FollowsBoundsOnly()
+    {
+        Assert.Equal(0u, Layout.ViewHash([]));
+        Assert.Equal(Layout.ViewHash(RsAlone), Layout.ViewHash([RsAlone[0] with { Id = "", Number = 7 }]));
+        Assert.NotEqual(Layout.ViewHash(RsAlone), Layout.ViewHash(RsDocked));
+    }
+}
+
 public class DeskForMyScreensTests
 {
     private static readonly MonitorRect[] Home =

@@ -14,7 +14,8 @@ public class ProtocolTests
             new(new Rectangle(0, 1200, 2560, 1440), 1),
             new(new Rectangle(2560, 0, 1920, 1200), 4),
         ];
-        var info = new HelloInfo(true, new Point(-640, 0), new Size(7680, 2640), 1234567890123, nonce, monitors, "Lärkan", "0.3.9+abc1234.dirty");
+        var info = new HelloInfo(true, new Point(-640, 0), new Size(7680, 2640), 1234567890123, nonce, monitors, "Lärkan", "0.3.9+abc1234.dirty",
+            DeskName: "Hemma", DeskNameUpdated: 42, ReceiverView: 0xDEADBEEF);
 
         var frame = Frame.Hello(info);
         Assert.True(Frame.TryDecode(frame.Encode(), out var decoded));
@@ -29,6 +30,9 @@ public class ProtocolTests
         Assert.Equal(monitors, parsed.Monitors);
         Assert.Equal("Lärkan", parsed.Name);
         Assert.Equal("0.3.9+abc1234.dirty", parsed.AppVersion);
+        Assert.Equal("Hemma", parsed.DeskName);
+        Assert.Equal(42, parsed.DeskNameUpdated);
+        Assert.Equal(0xDEADBEEFu, parsed.ReceiverView);
     }
 
     [Fact]

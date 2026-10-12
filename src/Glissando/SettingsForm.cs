@@ -17,6 +17,10 @@ internal sealed class PlacementCanvas : Control
     public MonitorRect[] Peer { get; set; } = [];
     public string OtherName { get; set; } = "Other PC";
 
+    /// <summary>The other PC is linked now. When it is not, its screens are the last ones it reported (or a
+    /// guess), drawn faded so they do not pass for a live PC.</summary>
+    public bool PeerLinked { get; set; }
+
     /// <summary>Thumbnail mode: no legend, no hint, no dragging - just the two desktops and the crossings.</summary>
     public bool Compact { get; set; }
 
@@ -75,7 +79,8 @@ internal sealed class PlacementCanvas : Control
         var layout = Current;
 
         using var mineBrush = new SolidBrush(Color.FromArgb(30, 32, 46));
-        using var peerBrush = new SolidBrush(Color.FromArgb(66, 133, 244));
+        bool offline = !Compact && !PeerLinked;
+        using var peerBrush = new SolidBrush(offline ? Color.FromArgb(150, 175, 215) : Color.FromArgb(66, 133, 244));
         using var white = new SolidBrush(Color.White);
         using var font = new Font(Font.FontFamily, 9f);
         using var small = new Font(Font.FontFamily, 7.5f);
@@ -93,7 +98,8 @@ internal sealed class PlacementCanvas : Control
         DrawTiles(g, Mine, Point.Empty, mineBrush, tileBorder, white, numberFont, font, scale, origin, fmt,
             single: $"This PC\n{layout.MyBounds.Width} x {layout.MyBounds.Height}");
         DrawTiles(g, Peer, _origin, peerBrush, tileBorder, white, numberFont, font, scale, origin, fmt,
-            single: Peer.Length == 1 && Peer[0].Number == 0 ? $"{OtherName}\n(size unknown)" : $"{OtherName}\n{layout.PeerBounds.Width} x {layout.PeerBounds.Height}");
+            single: offline ? $"{OtherName}\nnot connected"
+                : Peer.Length == 1 && Peer[0].Number == 0 ? $"{OtherName}\n(size unknown)" : $"{OtherName}\n{layout.PeerBounds.Width} x {layout.PeerBounds.Height}");
 
         // Every stretch of edge the cursor can cross.
         using var reachable = new Pen(Color.FromArgb(76, 175, 80), 3f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
@@ -116,7 +122,8 @@ internal sealed class PlacementCanvas : Control
         var right = new StringFormat(StringFormatFlags.NoWrap) { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center };
         g.DrawString(Mine.Length == 1 ? $"This PC: {layout.MyBounds.Width} x {layout.MyBounds.Height}" : $"This PC: {Mine.Length} screens",
             small, legendMine, new RectangleF(6, 2, Width / 2f, 16), left);
-        string peerText = Peer.Length == 1 && Peer[0].Number == 0 ? $"{OtherName}: size unknown until linked"
+        string peerText = offline ? $"{OtherName}: not connected - last known screens"
+            : Peer.Length == 1 && Peer[0].Number == 0 ? $"{OtherName}: size unknown until linked"
             : Peer.Length == 1 ? $"{OtherName}: {layout.PeerBounds.Width} x {layout.PeerBounds.Height}"
             : $"{OtherName}: {Peer.Length} screens";
         g.DrawString(peerText, small, legendPeer, new RectangleF(Width / 2f - 60, 2, Width / 2f + 54, 16), right);
@@ -571,6 +578,14 @@ internal sealed class SettingsForm : Form
         if (Top < wa.Top) Top = wa.Top;
         if (Right > wa.Right) Left = wa.Right - Width;
         if (Left < wa.Left) Left = wa.Left;
+    }
+
+    /// <summary>Whether the other PC is linked right now; the canvas fades its screens while it is not.</summary>
+    public void SetPeerLinked(bool linked)
+    {
+        if (_canvas.PeerLinked == linked) return;
+        _canvas.PeerLinked = linked;
+        _canvas.Invalidate();
     }
 
     /// <summary>The peer sent its monitors or a newer placement: reflect it while the form is open.</summary>

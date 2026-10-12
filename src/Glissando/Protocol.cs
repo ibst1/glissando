@@ -182,7 +182,7 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         int udpCount = Math.Min(8, h.UdpAddresses?.Length ?? 0);
         var deskBytes = Encoding.UTF8.GetBytes(h.DeskName ?? "");
         if (deskBytes.Length > 40) deskBytes = deskBytes[..40];
-        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + ids.Sum(b => 1 + b.Length) + 1 + versionBytes.Length + 3 + udpCount * 4 + 9 + deskBytes.Length + nameBytes.Length];
+        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + ids.Sum(b => 1 + b.Length) + 1 + versionBytes.Length + 3 + udpCount * 4 + 9 + deskBytes.Length + 4 + nameBytes.Length];
         p[0] = HelloInfo.Version;
         p[1] = (byte)(h.CaptureEnabled ? 1 : 0);
         BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(2), h.PeerOrigin.X);
@@ -221,6 +221,9 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         o += 9;
         deskBytes.CopyTo(p, o);
         o += deskBytes.Length;
+        // v8: which of the receiver's screen arrangements PeerOrigin was placed against.
+        BinaryPrimitives.WriteUInt32LittleEndian(p.AsSpan(o), h.ReceiverView);
+        o += 4;
         nameBytes.CopyTo(p, o);
         return new(FrameType.Hello, p);
     }
@@ -350,11 +353,13 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
 /// peer's nonce; input is only accepted once our own nonce has been acknowledged. <see cref="PeerOrigin"/>
 /// is where the sender believes the receiver's origin sits, in the sender's pixels; placements are
 /// compared by timestamp so that whichever PC was configured last wins. Monitors are the sender's own.
+/// <see cref="ReceiverView"/> is Layout.ViewHash of the receiver's monitors as the sender knows them (0 = none):
+/// a placement made against another arrangement of the receiver's screens belongs to another desk.
 /// </summary>
 public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Screen, long PlacementUpdated, byte[] Nonce, MonitorRect[] Monitors, string Name, string AppVersion = "",
-    ushort UdpPort = 0, IPAddress[]? UdpAddresses = null, string DeskName = "", long DeskNameUpdated = 0)
+    ushort UdpPort = 0, IPAddress[]? UdpAddresses = null, string DeskName = "", long DeskNameUpdated = 0, uint ReceiverView = 0)
 {
-    public const byte Version = 7;   // 5: UDP port+addresses; 6: a monitor id per monitor; 7: the current desk's name and when it was set
+    public const byte Version = 8;   // 5: UDP port+addresses; 6: a monitor id per monitor; 7: the current desk's name and when it was set; 8: ReceiverView
     public const int FixedSize = 1 + 1 + 4 + 4 + 2 + 2 + 8 + 16 + 1;
     public const int MonitorSize = 17;
     public const int MaxMonitors = 16;
@@ -400,6 +405,9 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
         if (p.Length < o + deskLen) return null;
         string deskName = Encoding.UTF8.GetString(p, o, deskLen);
         o += deskLen;
+        if (p.Length < o + 4) return null;
+        uint receiverView = BinaryPrimitives.ReadUInt32LittleEndian(p.AsSpan(o));
+        o += 4;
         return new HelloInfo(
             p[1] != 0,
             new Point(BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(2)), BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(6))),
@@ -412,7 +420,8 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
             udpPort,
             udpAddrs,
             deskName,
-            deskUpdated);
+            deskUpdated,
+            receiverView);
     }
 }
 
