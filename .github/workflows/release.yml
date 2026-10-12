@@ -1,0 +1,37 @@
+name: Release
+
+# Push a tag v0.3.<n> to publish. build.ps1 is for local builds (it also installs
+# and restarts Glissando), so the release publishes directly with the same flags.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish self-contained single-file exe
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', '' -replace '-.*$', ''
+          $info = "$version+$($env:GITHUB_SHA.Substring(0, 7))"
+          $buildTime = Get-Date -Format 'yyyy-MM-dd HH:mm'
+          dotnet publish src/Glissando/Glissando.csproj -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:Version=$version -p:InformationalVersion=$info `
+            -p:BuildTime="$buildTime" -o dist
+          if ($LASTEXITCODE -ne 0) { throw 'publish failed' }
+
+      - name: Create release and attach exe
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Glissando.exe
+          generate_release_notes: true
