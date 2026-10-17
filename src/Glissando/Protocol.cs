@@ -38,6 +38,7 @@ public enum FrameType : byte
     MirrorStop = 28,     // id(1): the viewer closed the mirror's window; the source stops that mirror
     MirrorResize = 29,   // id(1) w(u16) h(u16): the viewer resized the mirror's window; the source resizes its window to match
     Batch = 30,          // { len(u16) + an encoded frame }...: several frames in one packet, applied in order
+    Identify = 31,       // empty: show this PC's screen numbers on its screens for a few seconds (Settings, Screens tab)
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)
@@ -121,6 +122,7 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
 
     public static Frame Leave() => new(FrameType.Leave, []);
     public static Frame Bye() => new(FrameType.Bye, []);
+    public static Frame Identify() => new(FrameType.Identify, []);
     public static Frame Status(bool locked) => new(FrameType.Status, [locked ? (byte)1 : (byte)0]);
 
     public static Frame MouseMove(int dx, int dy)
@@ -182,7 +184,13 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         int udpCount = Math.Min(8, h.UdpAddresses?.Length ?? 0);
         var deskBytes = Encoding.UTF8.GetBytes(h.DeskName ?? "");
         if (deskBytes.Length > 40) deskBytes = deskBytes[..40];
-        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + ids.Sum(b => 1 + b.Length) + 1 + versionBytes.Length + 3 + udpCount * 4 + 9 + deskBytes.Length + 4 + nameBytes.Length];
+        var peerShiftBytes = Encoding.UTF8.GetBytes(h.PeerShifts ?? "");
+        var myShiftBytes = Encoding.UTF8.GetBytes(h.MyShifts ?? "");
+        // Each fits easily (a few screens of "id=dx,dy"); a Hello must stay inside one BLE packet (~520 bytes).
+        if (peerShiftBytes.Length > 200) peerShiftBytes = [];
+        if (myShiftBytes.Length > 200) myShiftBytes = [];
+        var p = new byte[HelloInfo.FixedSize + monitors.Length * HelloInfo.MonitorSize + ids.Sum(b => 1 + b.Length) + 1 + versionBytes.Length + 3 + udpCount * 4 + 9 + deskBytes.Length + 4
+            + 2 + peerShiftBytes.Length + 2 + myShiftBytes.Length + nameBytes.Length];
         p[0] = HelloInfo.Version;
         p[1] = (byte)(h.CaptureEnabled ? 1 : 0);
         BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(2), h.PeerOrigin.X);
@@ -224,6 +232,14 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
         // v8: which of the receiver's screen arrangements PeerOrigin was placed against.
         BinaryPrimitives.WriteUInt32LittleEndian(p.AsSpan(o), h.ReceiverView);
         o += 4;
+        // v9: screens moved on their own - the receiver's (PeerShifts) and the sender's (MyShifts), as Layout.FormatShifts.
+        foreach (var b in new[] { peerShiftBytes, myShiftBytes })
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(p.AsSpan(o), (ushort)b.Length);
+            o += 2;
+            b.CopyTo(p, o);
+            o += b.Length;
+        }
         nameBytes.CopyTo(p, o);
         return new(FrameType.Hello, p);
     }
@@ -357,9 +373,10 @@ public readonly record struct Frame(FrameType Type, byte[] Payload)
 /// a placement made against another arrangement of the receiver's screens belongs to another desk.
 /// </summary>
 public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Screen, long PlacementUpdated, byte[] Nonce, MonitorRect[] Monitors, string Name, string AppVersion = "",
-    ushort UdpPort = 0, IPAddress[]? UdpAddresses = null, string DeskName = "", long DeskNameUpdated = 0, uint ReceiverView = 0)
+    ushort UdpPort = 0, IPAddress[]? UdpAddresses = null, string DeskName = "", long DeskNameUpdated = 0, uint ReceiverView = 0,
+    string PeerShifts = "", string MyShifts = "")
 {
-    public const byte Version = 8;   // 5: UDP port+addresses; 6: a monitor id per monitor; 7: the current desk's name and when it was set; 8: ReceiverView
+    public const byte Version = 9;   // 5: UDP port+addresses; 6: a monitor id per monitor; 7: the current desk's name and when it was set; 8: ReceiverView; 9: screens moved on their own
     public const int FixedSize = 1 + 1 + 4 + 4 + 2 + 2 + 8 + 16 + 1;
     public const int MonitorSize = 17;
     public const int MaxMonitors = 16;
@@ -408,6 +425,16 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
         if (p.Length < o + 4) return null;
         uint receiverView = BinaryPrimitives.ReadUInt32LittleEndian(p.AsSpan(o));
         o += 4;
+        var shifts = new string[2];
+        for (int i = 0; i < 2; i++)
+        {
+            if (p.Length < o + 2) return null;
+            int len = BinaryPrimitives.ReadUInt16LittleEndian(p.AsSpan(o));
+            o += 2;
+            if (p.Length < o + len) return null;
+            shifts[i] = Encoding.UTF8.GetString(p, o, len);
+            o += len;
+        }
         return new HelloInfo(
             p[1] != 0,
             new Point(BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(2)), BinaryPrimitives.ReadInt32LittleEndian(p.AsSpan(6))),
@@ -421,7 +448,9 @@ public sealed record HelloInfo(bool CaptureEnabled, Point PeerOrigin, Size Scree
             udpAddrs,
             deskName,
             deskUpdated,
-            receiverView);
+            receiverView,
+            shifts[0],
+            shifts[1]);
     }
 }
 

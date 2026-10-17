@@ -32,6 +32,27 @@ public sealed class Session : IDisposable
     /// <summary>Raised when placement or the peer's monitors were adopted from the other PC (settings already saved).</summary>
     public event Action? SettingsChanged;
 
+    /// <summary>The other PC asked to see this PC's screen numbers (Identify on its Screens tab). Raised on the
+    /// receive thread.</summary>
+    public event Action? IdentifyRequested;
+
+    /// <summary>The other PC's hello came in another protocol version (until one in ours does).</summary>
+    private volatile bool _peerTooOld;
+
+    /// <summary>Ask the other PC to show its screen numbers on its screens. Null when sent, else why not, for the dialog.</summary>
+    public string? SendIdentify()
+    {
+        if (Authenticated)
+        {
+            Enqueue(Frame.Identify());
+            return null;
+        }
+        // Linked but not talking: a build from before Identify (hello version 9) cannot show numbers either.
+        return _peerTooOld
+            ? "The other PC runs an older Glissando: give it this build (dist\\Glissando.exe) to show its numbers too."
+            : "The other PC is not linked: only this PC's numbers.";
+    }
+
     public string TransportStatus { get; private set; } = "starting";
     public bool Linked => _channel.IsLinked;
     public bool Authenticated { get; private set; }
@@ -229,21 +250,31 @@ public sealed class Session : IDisposable
             // on both PCs, it is almost certainly this desk (a monitor renumbered or nudged): take its placement.
             // With several candidates, do not guess - keep the current placement and let the Desks tab offer them.
             var matches = _s.Placements.Keys.Where(k => k != key && Layout.SameScreens(k, key)).ToArray();
-            if (matches.Length == 1)
+            // Straight from a desk with the same screens (a screen renumbered when a PC restarted, nudged by Windows,
+            // or rearranged from the Screens tab): this is still that desk, and the placement in use - the newest -
+            // carries over. A remembered desk's placement may be months old: taking it on a renumbering moved the
+            // other PC out of the corner it had just been put in, and sent that over as if it were the edit
+            // (2026-10-17).
+            bool sameDeskAsBefore = Layout.IsCompleteSetupKey(previous) && Layout.SameScreens(previous, key);
+            if (matches.Length == 1 && !sameDeskAsBefore)
             {
                 var only = _s.Placements[matches[0]];
-                _s.PeerX = only.PeerX; _s.PeerY = only.PeerY; _s.PlacementUpdated = only.Updated;
+                // Same panels, moved (rearranged in Display settings, perhaps from Glissando's own Screens tab): the
+                // other PC still stands beside the panel it stood beside, so carry the placement by that panel.
+                var carriedOrigin = Layout.CarryPlacement(new Point(only.PeerX, only.PeerY), matches[0], key) ?? new Point(only.PeerX, only.PeerY);
+                _s.PeerX = carriedOrigin.X; _s.PeerY = carriedOrigin.Y; _s.PlacementUpdated = only.Updated;
+                _s.PeerShifts = only.PeerShifts; _s.MyShifts = only.MyShifts;
                 _s.RememberPlacement(key);
                 if (_s.Placements.TryGetValue(key, out var np)) np.Name = only.Name;
                 try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
-                Log.Info($"screen setup ({why}): new arrangement, but one remembered desk has the same screens on both PCs{(only.Name != "" ? $" (\"{only.Name}\")" : "")}: using its placement, other PC at ({only.PeerX},{only.PeerY})");
+                Log.Info($"screen setup ({why}): new arrangement, but one remembered desk has the same screens on both PCs{(only.Name != "" ? $" (\"{only.Name}\")" : "")}: using its placement, other PC at ({_s.PeerX},{_s.PeerY})");
                 RebuildLayout();
                 SettingsChanged?.Invoke();
                 if (Linked) SendHello();
             }
             // Remember a new desk only with the other PC linked: without it its monitor list is the last desk's,
             // and the placement in use belongs to that desk too.
-            else if (_s.PeerX is int px && _s.PeerY is int py && Authenticated)
+            else if (_s.PeerX is int px && _s.PeerY is int py && (Authenticated || sameDeskAsBefore))
             {
                 // The placement in use belongs to the previous desk. Coming from a provisional key (the other PC's
                 // monitors just arrived) it is this desk's own; coming from another complete desk it is carried
@@ -258,9 +289,14 @@ public sealed class Session : IDisposable
                 bool moved = c != new Point(px, py);
                 _s.PeerX = c.X; _s.PeerY = c.Y;
                 _s.RememberPlacement(key);
+                if (sameDeskAsBefore && _s.Placements.TryGetValue(previous, out var was) && _s.Placements.TryGetValue(key, out var now) && now.Name == "")
+                {
+                    now.Name = was.Name;
+                    now.NameUpdated = was.NameUpdated;
+                }
                 try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
                 Log.Info($"screen setup ({why}): new; remembering " + (moved ? $"the placement carried over from the previous desk, other PC at ({c.X},{c.Y})" : "the current placement") + " for it"
-                    + (matches.Length > 1 ? $" ({matches.Length} remembered desks have the same screens - pick one on the Desks tab)" : ""));
+                    + (sameDeskAsBefore ? " (same screens as the desk before)" : matches.Length > 1 ? $" ({matches.Length} remembered desks have the same screens - pick one on the Desks tab)" : ""));
                 if (!moved) return;
                 RebuildLayout();
                 SettingsChanged?.Invoke();
@@ -625,7 +661,8 @@ public sealed class Session : IDisposable
         var hello = Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version,
             (ushort)(_udp?.LocalPort ?? 0), _udp != null ? UdpPixelLink.LocalAddresses() : null,
             _s.Placements.TryGetValue(_setupKey, out var desk) ? desk.Name : "", _s.Placements.TryGetValue(_setupKey, out var desk2) ? desk2.NameUpdated : 0,
-            Layout.ViewHash(_s.OtherMonitorList)));
+            Layout.ViewHash(_s.OtherMonitorList),
+            Layout.FormatShifts(layout.Peer, layout.PeerShift), Layout.FormatShifts(layout.Mine, layout.MineShift)));
         // The monitor layout travels in Hello. A display or settings change mid-session sends one Hello, and on
         // this lossy link a single packet can be lost, leaving the peer with a stale arrangement -- the two
         // dialogs then disagree and a corner monitor becomes unreachable. Send a few copies so the update
@@ -726,9 +763,11 @@ public sealed class Session : IDisposable
                 {
                     Log.Warn("hello with another protocol version; both PCs need the same Glissando version");
                     TransportStatus = "other PC runs another version";
+                    _peerTooOld = true;
                     StateChanged?.Invoke();
                     return;
                 }
+                _peerTooOld = false;
                 PeerName = hello.Name;
                 PeerVersion = hello.AppVersion;
                 // Hello now also comes once a minute as a refresh; log it only when it says something new.
@@ -787,6 +826,10 @@ public sealed class Session : IDisposable
 
             case FrameType.ClipboardImage:
                 if (Authenticated) ReceiveClipboardImage(f);
+                break;
+
+            case FrameType.Identify:
+                if (Authenticated) IdentifyRequested?.Invoke();
                 break;
 
             case FrameType.Bye:
@@ -929,13 +972,16 @@ public sealed class Session : IDisposable
         // Nobody has saved a placement yet and the two defaults disagree (both say "the other PC is to my
         // right"): let the PC with the greater name adopt the other's view, so the pair is at least consistent
         // and the cursor can come back. Saving in the settings dialog on either PC replaces this.
-        bool tieBreak = !newer && hello.PlacementUpdated == _s.PlacementUpdated && theirView != myView
+        bool tieBreak = !newer && hello.PlacementUpdated == _s.PlacementUpdated && (theirView != myView || hello.PeerShifts != _s.MyShifts || hello.MyShifts != _s.PeerShifts)
             && string.CompareOrdinal(Environment.MachineName, hello.Name) > 0;
         if (newer || tieBreak)
         {
             Log.Info($"adopting placement from {hello.Name}{(tieBreak ? " (tie-break)" : "")}: peer origin at {theirView}");
             _s.PeerX = theirView.X;
             _s.PeerY = theirView.Y;
+            // Its screens moved on their own are ours to draw as moved, and the ones of ours it moved, ours.
+            _s.PeerShifts = hello.MyShifts;
+            _s.MyShifts = hello.PeerShifts;
             _s.PlacementUpdated = hello.PlacementUpdated;
             _s.RememberPlacement(_setupKey);
             changed = true;

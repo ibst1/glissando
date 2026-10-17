@@ -145,7 +145,8 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _capture.LeftRemote += () => _window.BeginInvoke(_scrollCatcher.HideAway);
 
         _injector = new InputInjector(layout);
-        _window.DisplayChanged += () => _session?.ScreenChanged();
+        // The open dialog redraws this PC's screens too: they may just have been rearranged from its Screens tab.
+        _window.DisplayChanged += () => { _session?.ScreenChanged(); _openForm?.Reload(_settings, _session?.PeerName ?? ""); };
 
         IChannel channel = settings.Ble switch
         {
@@ -157,6 +158,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _session = new Session(settings, channel, _capture, _injector, this);
         _session.StateChanged += () => _window.BeginInvoke(() => { UpdateTray(); _openForm?.SetPeerLinked(_session.Authenticated); });
         _session.SettingsChanged += () => _window.BeginInvoke(() => _openForm?.Reload(_settings, _session.PeerName));
+        _session.IdentifyRequested += () => _window.BeginInvoke(() => IdentifyOverlay.ShowAll(otherPc: true));
         // Incoming window-mirroring frames arrive on the receive threads; the receiver reassembles and decodes
         // there and asks for the UI thread only to paint.
         _session.MirrorReceived += OnMirrorFrame;
@@ -449,6 +451,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _openForm = new SettingsForm(working, firstRun: false, _session.PeerName);
         _openForm.SetPeerLinked(_session.Authenticated);
         _openForm.Saved += Apply;
+        _openForm.IdentifyRequested += () => _session.SendIdentify();
         _openForm.FormClosed += (_, _) => { _openForm.Dispose(); _openForm = null; };
         _openForm.Show();
     }
@@ -460,6 +463,8 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _settings.Ble = working.Ble;
         _settings.PeerX = working.PeerX;
         _settings.PeerY = working.PeerY;
+        _settings.PeerShifts = working.PeerShifts;
+        _settings.MyShifts = working.MyShifts;
         _settings.PlacementUpdated = working.PlacementUpdated;
         _settings.CaptureEnabled = working.CaptureEnabled;
         _settings.SyncClipboard = working.SyncClipboard;

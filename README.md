@@ -112,6 +112,18 @@ Glissando.exe --ble connect --console pin the Bluetooth role, show the log
   re-sends its layout, so a display change that Windows reported late (a
   dock waking up) or a lost handshake packet cannot leave the other PC with
   a stale arrangement for long.
+* Which screen is which: **Identify** on the Screens tab shows each screen's
+  number in big on the screens themselves, on both PCs, as Identify in
+  Windows Display settings does. The left mouse button drags a whole PC (all
+  blue screens, or all dark ones); the **right button drags one screen**. One
+  of the other PC's screens then moves on its own (say its two screens stand
+  on either side of yours);
+  *Join its screens* puts them back as its Windows has them. Only the
+  crossings change: where its Windows puts two of its screens side by side,
+  the cursor moves across that seam there, so that edge cannot also lead
+  here. Right-dragging one of **this PC's own** screens rearranges them in Windows,
+  as in Display settings (no administrator rights needed); the other PC
+  stays beside the screen it stood beside.
 * Not possible without administrator rights on the controlled PC: typing into
   UAC prompts, elevated windows, or the lock screen. Unlock it with its own
   keyboard.

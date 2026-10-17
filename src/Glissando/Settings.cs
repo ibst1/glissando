@@ -12,6 +12,10 @@ public sealed class SavedPlacement
 {
     public int PeerX { get; set; }
     public int PeerY { get; set; }
+    /// <summary>The other PC's screens moved on their own, and this PC's as the other PC moved them (see
+    /// Settings.PeerShifts and MyShifts).</summary>
+    public string PeerShifts { get; set; } = "";
+    public string MyShifts { get; set; } = "";
     /// <summary>Unix ms of the edit this placement came from (see Settings.PlacementUpdated).</summary>
     public long Updated { get; set; }
     /// <summary>The user's word for the desk ("Home", "Office A"); optional. Shared with the other PC through the
@@ -73,6 +77,14 @@ public sealed class Settings
     public int? PeerX { get; set; }
     public int? PeerY { get; set; }
 
+    /// <summary>The other PC's screens moved on their own, away from where its Windows arrangement puts them
+    /// relative to each other: "key=dx,dy;..." (Layout.FormatShifts), empty when none is.</summary>
+    public string PeerShifts { get; set; } = "";
+
+    /// <summary>This PC's screens as the other PC moved them on its own (the mirror of its PeerShifts). Only the
+    /// placement uses them; this PC's real arrangement is Windows' business.</summary>
+    public string MyShifts { get; set; } = "";
+
     /// <summary>Last known size of the other PC's virtual screen.</summary>
     public int OtherScreenWidth { get; set; }
     public int OtherScreenHeight { get; set; }
@@ -132,9 +144,11 @@ public sealed class Settings
     {
         changed = false;
         if (!Layout.IsCompleteSetupKey(key) || !Placements.TryGetValue(key, out var p)) return false;
-        changed = PeerX != p.PeerX || PeerY != p.PeerY;
+        changed = PeerX != p.PeerX || PeerY != p.PeerY || PeerShifts != p.PeerShifts || MyShifts != p.MyShifts;
         PeerX = p.PeerX;
         PeerY = p.PeerY;
+        PeerShifts = p.PeerShifts;
+        MyShifts = p.MyShifts;
         PlacementUpdated = changed ? p.Updated : Math.Max(PlacementUpdated, p.Updated);
         return true;
     }
@@ -144,7 +158,7 @@ public sealed class Settings
     {
         if (PeerX is not int x || PeerY is not int y || !Layout.IsCompleteSetupKey(key)) return;
         Placements.TryGetValue(key, out var old);
-        Placements[key] = new SavedPlacement { PeerX = x, PeerY = y, Updated = PlacementUpdated, Name = old?.Name ?? "", NameUpdated = old?.NameUpdated ?? 0 };
+        Placements[key] = new SavedPlacement { PeerX = x, PeerY = y, PeerShifts = PeerShifts, MyShifts = MyShifts, Updated = PlacementUpdated, Name = old?.Name ?? "", NameUpdated = old?.NameUpdated ?? 0 };
     }
 
     /// <summary>After a few minutes without input, ping only every 10 s so the BLE link can idle (first move after that is slower).</summary>

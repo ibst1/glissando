@@ -15,17 +15,34 @@ public readonly record struct MonitorRect(Rectangle Bounds, int Number, string I
 /// </summary>
 public readonly record struct Crossing(Dir Dir, Point Target);
 
-/// <summary>A stretch of one of my monitor edges that leads to the other PC (for drawing).</summary>
-public readonly record struct EdgeSegment(Dir Side, int Fixed, int From, int To);
+/// <summary>A stretch of one of my monitor edges that leads to the other PC, in the placement's coordinates (for
+/// drawing). <see cref="Shift"/> is that monitor's own shift: subtract it to get this PC's real pixels.</summary>
+public readonly record struct EdgeSegment(Dir Side, int Fixed, int From, int To, Point Shift = default);
 
 /// <summary>
 /// Both PCs' monitors in one coordinate space. <see cref="PeerOrigin"/> is where the other PC's
 /// virtual-screen origin sits in my pixels; the other PC stores the negated vector with the lists swapped.
 /// Anywhere one of my monitor edges borders one of the peer's monitors (with none of my own monitors in
 /// between) the cursor can cross, so the peer can sit beside, above, below, or in a notch of my desktop.
+/// <para>A screen can also be moved on its own (<see cref="MineShift"/>, <see cref="PeerShift"/>, one per
+/// monitor, empty = none): the other PC's screens may stand apart from each other, on both sides of this PC,
+/// whatever Windows there says. The placement ("world") position of a monitor is its real one plus its shift
+/// (plus PeerOrigin for the peer's). Crossings are found in the world; where a monitor really borders another of
+/// its own PC's, Windows moves the cursor across that seam and it is never a crossing.</para>
 /// </summary>
-public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOrigin)
+public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOrigin, Point[]? MineShift = null, Point[]? PeerShift = null)
 {
+    public Point MyShiftAt(int i) => MineShift is { } s && i < s.Length ? s[i] : Point.Empty;
+    public Point PeerShiftAt(int i) => PeerShift is { } s && i < s.Length ? s[i] : Point.Empty;
+
+    /// <summary>My monitors where the placement has them (real unless the other PC moved one on its own).</summary>
+    public MonitorRect[] MineInWorld() => Mine.Select((m, i) => m.Offset(MyShiftAt(i))).ToArray();
+
+    /// <summary>The peer's monitors in the placement's coordinates.</summary>
+    public MonitorRect[] PeerInMine() => Peer.Select((m, i) => m.Offset(Add(PeerOrigin, PeerShiftAt(i)))).ToArray();
+
+    public bool HasShifts => (MineShift?.Any(p => p != Point.Empty) ?? false) || (PeerShift?.Any(p => p != Point.Empty) ?? false);
+
     /// <summary>A peer monitor within this many pixels of flush against one of my edges still counts as a
     /// crossing. Mixed-resolution monitors that Windows snaps together leave a small step (DPI rounding: an
     /// 8 px gap between a 2160- and a 1080-tall screen was the case that motivated this), and the user cannot
@@ -43,9 +60,7 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
 
     public static Point Add(Point a, Point b, int times = 1) => new(a.X + b.X * times, a.Y + b.Y * times);
 
-    public Layout Inverse() => new(Peer, Mine, new Point(-PeerOrigin.X, -PeerOrigin.Y));
-
-    public MonitorRect[] PeerInMine() => Peer.Select(m => m.Offset(PeerOrigin)).ToArray();
+    public Layout Inverse() => new(Peer, Mine, new Point(-PeerOrigin.X, -PeerOrigin.Y), PeerShift, MineShift);
 
     public static Rectangle Union(IEnumerable<MonitorRect> monitors)
     {
@@ -54,7 +69,10 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         return u ?? Rectangle.Empty;
     }
 
+    /// <summary>This PC's virtual screen (real pixels; what Hello reports as the screen size).</summary>
     public Rectangle MyBounds => Union(Mine);
+    /// <summary>My monitors as placed (differs from MyBounds only when the other PC moved one on its own).</summary>
+    public Rectangle MyWorldBounds => Union(MineInWorld());
     public Rectangle PeerBounds => Union(PeerInMine());
 
     private static bool Contains(Rectangle r, Point p) => p.X >= r.Left && p.X < r.Right && p.Y >= r.Top && p.Y < r.Bottom;
@@ -77,10 +95,12 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
             Dir.Up => dy < 0,
             _ => dy > 0,
         };
-        foreach (var m in Mine)
+        var mineWorld = MineInWorld();
+        for (int mi = 0; mi < Mine.Length; mi++)
         {
-            var r = m.Bounds;
+            var r = Mine[mi].Bounds;
             if (!Contains(r, p)) continue;
+            var shift = MyShiftAt(mi);
             foreach (Dir d in Enum.GetValues<Dir>())
             {
                 bool onEdge = d switch
@@ -94,16 +114,22 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
                 if (hasDelta && !Toward(d, dx, dy)) continue;
                 // Scan up to EdgeTolerance px beyond the edge: a peer screen a few px away (a small snap step)
                 // still counts, but one of my own monitors in the way blocks first, so a seam to my own screen
-                // never becomes a crossing.
+                // never becomes a crossing. My own monitors block both where they really are (Windows moves the
+                // cursor there) and where the placement has them.
                 Point? hit = null;
+                int hitMonitor = -1;
                 for (int k = 1; k <= EdgeTolerance; k++)
                 {
                     var q = Add(p, Unit(d), k);
                     if (Mine.Any(o => Contains(o.Bounds, q))) break;
-                    if (peer.Any(o => Contains(o.Bounds, q))) { hit = q; break; }
+                    var qw = Add(q, shift);
+                    if (mineWorld.Any(o => Contains(o.Bounds, qw))) break;
+                    hitMonitor = Array.FindIndex(peer, o => Contains(o.Bounds, qw));
+                    if (hitMonitor >= 0) { hit = qw; break; }
                 }
                 if (hit is not Point qp) continue;
-                candidates.Add(new Crossing(d, new Point(qp.X - PeerOrigin.X, qp.Y - PeerOrigin.Y)));
+                var into = Add(PeerOrigin, PeerShiftAt(hitMonitor));
+                candidates.Add(new Crossing(d, new Point(qp.X - into.X, qp.Y - into.Y)));
             }
         }
         if (candidates.Count == 0) return null;
@@ -141,21 +167,24 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         foreach (var s in CrossingSegments())
         {
             bool vertical = s.Side is Dir.Left or Dir.Right;
-            int fixedAxis = vertical ? p.X : p.Y;
-            int alongAxis = vertical ? p.Y : p.X;
+            var pw = Add(p, s.Shift);
+            int fixedAxis = vertical ? pw.X : pw.Y;
+            int alongAxis = vertical ? pw.Y : pw.X;
             if (Math.Abs(fixedAxis - s.Fixed) <= margin && alongAxis >= s.From - margin && alongAxis < s.To + margin)
                 return true;
         }
         return false;
     }
 
-    /// <summary>Every stretch of my monitor edges that leads to the other PC.</summary>
+    /// <summary>Every stretch of my monitor edges that leads to the other PC, in the placement's coordinates.</summary>
     public IEnumerable<EdgeSegment> CrossingSegments()
     {
         var peer = PeerInMine().Select(m => m.Bounds).ToArray();
-        foreach (var m in Mine)
+        var mineWorld = MineInWorld();
+        for (int mi = 0; mi < Mine.Length; mi++)
         {
-            var r = m.Bounds;
+            var shift = MyShiftAt(mi);
+            var r = mineWorld[mi].Bounds;
             foreach (Dir d in Enum.GetValues<Dir>())
             {
                 bool vertical = d is Dir.Left or Dir.Right;
@@ -177,18 +206,26 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
                     if (i.Width <= 0 || i.Height <= 0) continue;
                     intervals.Add(vertical ? (i.Top, i.Bottom) : (i.Left, i.Right));
                 }
-                foreach (var o in Mine)
+                // My own monitors block where the placement has them and where they really are (a real
+                // neighbour, carried into this monitor's placement by its shift).
+                for (int oi = 0; oi < Mine.Length; oi++)
                 {
-                    var i = Rectangle.Intersect(strip, o.Bounds);
-                    if (i.Width <= 0 || i.Height <= 0) continue;
-                    intervals = Subtract(intervals, vertical ? (i.Top, i.Bottom) : (i.Left, i.Right));
+                    if (oi == mi) continue;
+                    foreach (var ob in new[] { mineWorld[oi].Bounds, Shifted(Mine[oi].Bounds, shift) })
+                    {
+                        var i = Rectangle.Intersect(strip, ob);
+                        if (i.Width <= 0 || i.Height <= 0) continue;
+                        intervals = Subtract(intervals, vertical ? (i.Top, i.Bottom) : (i.Left, i.Right));
+                    }
                 }
                 int fixedPos = d switch { Dir.Left => r.Left, Dir.Right => r.Right, Dir.Up => r.Top, _ => r.Bottom };
                 foreach (var (a, b) in intervals)
-                    if (b > a) yield return new EdgeSegment(d, fixedPos, a, b);
+                    if (b > a) yield return new EdgeSegment(d, fixedPos, a, b, shift);
             }
         }
     }
+
+    private static Rectangle Shifted(Rectangle r, Point by) => new(r.X + by.X, r.Y + by.Y, r.Width, r.Height);
 
     private static List<(int a, int b)> Subtract(List<(int a, int b)> src, (int a, int b) cut)
     {
@@ -284,6 +321,112 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
 
     private static long Sq(long v) => v * v;
 
+    /// <summary>
+    /// Snaps one screen being dragged on its own: flush against a side of one of <paramref name="anchors"/>, sharing
+    /// at least <paramref name="minOverlap"/> px of that edge, overlapping none of <paramref name="obstacles"/>, its
+    /// other axis lined up with a nearby edge when one is within <paramref name="alignTolerance"/>. Returns the new
+    /// top-left, or null when there is no such place.
+    /// </summary>
+    public static Point? SnapRect(Size size, IReadOnlyList<Rectangle> anchors, IReadOnlyList<Rectangle> obstacles, Point proposed, int alignTolerance, int minOverlap = 64)
+    {
+        var candidates = new List<(Point o, bool aligned)>();
+        foreach (var a in anchors)
+            foreach (Dir side in Enum.GetValues<Dir>())
+            {
+                bool vertical = side is Dir.Left or Dir.Right;
+                var o = proposed;
+                switch (side)
+                {
+                    case Dir.Right: o.X = a.Right; break;
+                    case Dir.Left: o.X = a.Left - size.Width; break;
+                    case Dir.Down: o.Y = a.Bottom; break;
+                    default: o.Y = a.Top - size.Height; break;
+                }
+                int ov = Math.Min(minOverlap, vertical ? Math.Min(a.Height, size.Height) : Math.Min(a.Width, size.Width));
+                if (vertical) o.Y = Math.Clamp(o.Y, a.Top + ov - size.Height, Math.Max(a.Top + ov - size.Height, a.Bottom - ov));
+                else o.X = Math.Clamp(o.X, a.Left + ov - size.Width, Math.Max(a.Left + ov - size.Width, a.Right - ov));
+                candidates.Add((o, false));
+                foreach (var a2 in anchors)
+                {
+                    int[] options = vertical
+                        ? [a2.Top, a2.Bottom - size.Height, a2.Bottom, a2.Top - size.Height]
+                        : [a2.Left, a2.Right - size.Width, a2.Right, a2.Left - size.Width];
+                    foreach (var v in options)
+                    {
+                        var c = vertical ? new Point(o.X, v) : new Point(v, o.Y);
+                        // Aligned along the free axis, it must still share some edge with the anchor it is flush against.
+                        int shared = vertical ? Math.Min(a.Bottom, c.Y + size.Height) - Math.Max(a.Top, c.Y)
+                                              : Math.Min(a.Right, c.X + size.Width) - Math.Max(a.Left, c.X);
+                        if (shared >= ov) candidates.Add((c, true));
+                    }
+                }
+            }
+        bool Free(Point o)
+        {
+            var r = new Rectangle(o, size);
+            foreach (var b in obstacles)
+            {
+                var i = Rectangle.Intersect(r, b);
+                if (i.Width > 0 && i.Height > 0) return false;
+            }
+            return true;
+        }
+        long Dist(Point p, Point q) => Sq(p.X - q.X) + Sq(p.Y - q.Y);
+        var valid = candidates.Where(c => Free(c.o)).Distinct().ToList();
+        if (valid.Count == 0) return null;
+        var best = valid.MinBy(c => Dist(c.o, proposed));
+        if (!best.aligned)
+        {
+            var near = valid
+                .Where(c => c.aligned && (c.o.X == best.o.X || c.o.Y == best.o.Y))
+                .Where(c => Math.Max(Math.Abs(c.o.X - best.o.X), Math.Abs(c.o.Y - best.o.Y)) <= alignTolerance)
+                .OrderBy(c => Dist(c.o, best.o))
+                .Take(1).ToList();
+            if (near.Count == 1) best = near[0];
+        }
+        return best.o;
+    }
+
+    // ---- screens moved on their own --------------------------------------------------
+
+    /// <summary>What a monitor's shift is stored under: its panel identity, or its Windows number when it has
+    /// none (or shares it with an identical panel, both then told apart by number).</summary>
+    public static string[] ScreenKeys(MonitorRect[] monitors) =>
+        monitors.Select(m => m.Id == "" ? $"#{m.Number}"
+            : monitors.Count(o => o.Id == m.Id) > 1 ? $"{m.Id}#{m.Number}" : m.Id).ToArray();
+
+    /// <summary>Shifts as text, "key=dx,dy;..." (keys escaped), leaving out the ones that are zero.</summary>
+    public static string FormatShifts(MonitorRect[] monitors, Point[]? shifts)
+    {
+        if (shifts == null) return "";
+        var keys = ScreenKeys(monitors);
+        return string.Join(";", keys.Select((k, i) => (k, s: i < shifts.Length ? shifts[i] : Point.Empty))
+            .Where(x => x.s != Point.Empty)
+            .Select(x => $"{Uri.EscapeDataString(x.k)}={x.s.X},{x.s.Y}"));
+    }
+
+    /// <summary>The shift of each monitor (zero for any not in the text); null when none is shifted.</summary>
+    public static Point[]? ParseShifts(MonitorRect[] monitors, string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var map = new Dictionary<string, Point>();
+        foreach (var part in text.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var kv = part.Split('=', 2);
+            if (kv.Length != 2) continue;
+            var xy = kv[1].Split(',');
+            if (xy.Length == 2 && int.TryParse(xy[0], out int x) && int.TryParse(xy[1], out int y))
+                map[Uri.UnescapeDataString(kv[0])] = new Point(x, y);
+        }
+        var keys = ScreenKeys(monitors);
+        var shifts = keys.Select(k => map.TryGetValue(k, out var p) ? p : Point.Empty).ToArray();
+        return shifts.Any(p => p != Point.Empty) ? shifts : null;
+    }
+
+    /// <summary>The monitors moved by their shifts (shifts may be null).</summary>
+    public static MonitorRect[] Shift(MonitorRect[] monitors, Point[]? shifts) =>
+        monitors.Select((m, i) => shifts != null && i < shifts.Length ? m.Offset(shifts[i]) : m).ToArray();
+
     // ---- screen setups --------------------------------------------------------------
 
     /// <summary>A monitor set as text, order-independent: "x,y,w,h#n@id;...".</summary>
@@ -346,18 +489,32 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         if (!TryParseSetupKey(fromKey, out var oldMine, out var oldName, out var oldPeer)
             || !TryParseSetupKey(toKey, out var newMine, out var newName, out var newPeer)
             || oldName != newName || oldPeer.Length == 0 || newPeer.Length == 0) return null;
-        static Point? Shift(MonitorRect[] from, MonitorRect[] to)
+        // How far the shared panels moved. When they disagree (screens rearranged in Display settings), go by the
+        // panels the other PC stood beside - it is still beside them - and then by what most panels say.
+        static Point? Moved(MonitorRect[] from, MonitorRect[] to, Func<MonitorRect, bool> preferred)
         {
             if (MonitorSignature(from) == MonitorSignature(to)) return Point.Empty;
+            var moves = new List<(Point d, bool preferred)>();
             foreach (var n in to)
             {
                 if (n.Id == "") continue;
                 foreach (var o in from)
-                    if (o.Id == n.Id && o.Bounds.Size == n.Bounds.Size) return new Point(n.Bounds.X - o.Bounds.X, n.Bounds.Y - o.Bounds.Y);
+                    if (o.Id == n.Id && o.Bounds.Size == n.Bounds.Size) { moves.Add((new Point(n.Bounds.X - o.Bounds.X, n.Bounds.Y - o.Bounds.Y), preferred(o))); break; }
             }
-            return null;
+            if (moves.Count == 0) return null;
+            var pool = moves.Any(m => m.preferred) ? moves.Where(m => m.preferred) : moves;
+            return pool.GroupBy(m => m.d).OrderByDescending(g => g.Count()).First().Key;
         }
-        if (Shift(oldMine, newMine) is not Point dMine || Shift(oldPeer, newPeer) is not Point dPeer) return null;
+        var oldPeerRects = oldPeer.Select(m => Shifted(m.Bounds, origin)).ToArray();
+        bool Touch(Rectangle a, Rectangle b)
+        {
+            var i = Rectangle.Intersect(Rectangle.Inflate(a, EdgeTolerance, EdgeTolerance), b);
+            return i.Width > 0 && i.Height > 0;
+        }
+        // On both sides, the panels where the two PCs meet are the ones to go by.
+        bool BesidePeer(MonitorRect m) => oldPeerRects.Any(p => Touch(m.Bounds, p));
+        bool BesideMe(MonitorRect m) => oldMine.Any(o => Touch(Shifted(m.Bounds, origin), o.Bounds));
+        if (Moved(oldMine, newMine, BesidePeer) is not Point dMine || Moved(oldPeer, newPeer, BesideMe) is not Point dPeer) return null;
         // Our coordinates moved by dMine; the other PC's origin moved by dPeer within its own.
         var carried = new Point(origin.X + dMine.X - dPeer.X, origin.Y + dMine.Y - dPeer.Y);
         // Still touching and clear of our screens: keep it exactly. Otherwise (it stood beside a monitor that is
@@ -517,6 +674,8 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
             var size = s.OtherScreen.IsEmpty ? DefaultPeerSize(mine) : s.OtherScreen;
             peer = [new MonitorRect(new Rectangle(Point.Empty, size), 0)];
         }
+        var mineShift = ParseShifts(mine, s.MyShifts);
+        var peerShift = ParseShifts(peer, s.PeerShifts);
         Point origin;
         if (s.PeerX is int x && s.PeerY is int y)
         {
@@ -528,8 +687,8 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
             var anchor = mine.MaxBy(m => (long)m.Bounds.Width * m.Bounds.Height).Bounds;
             var peerBounds = Union(peer);
             var proposed = new Point(Union(mine).Right - peerBounds.X, anchor.Top + (anchor.Height - peerBounds.Height) / 2 - peerBounds.Y);
-            origin = Snap(mine, peer, proposed);
+            origin = Snap(Shift(mine, mineShift), Shift(peer, peerShift), proposed);
         }
-        return new Layout(mine, peer, origin);
+        return new Layout(mine, peer, origin, mineShift, peerShift);
     }
 }

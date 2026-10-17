@@ -8,14 +8,30 @@ namespace Glissando;
 /// Drag the other PC's screens to where they physically stand: beside, above, below, or tucked into an
 /// empty corner of this PC's desktop. They snap flush against a monitor edge; green marks every stretch
 /// of edge the cursor can cross. Coordinates are this PC's pixels; the drawing is scaled to fit.
+/// The left button drags a whole PC: the other PC's screens (blue) or this PC's (dark) all together. The right
+/// button drags one screen: one of the other PC's on its own (only the placement; Windows there is not touched),
+/// or one of this PC's, which rearranges them in Windows, as Display settings does.
 /// </summary>
 internal sealed class PlacementCanvas : Control
 {
     public event Action? PlacementChanged;
 
-    public MonitorRect[] Mine { get; set; } = Glissando.Layout.MyMonitors();
+    /// <summary>One of this PC's screens was dropped somewhere new: every monitor's new top-left (by Windows
+    /// number) in this PC's pixels, for DisplayArrangement.Apply.</summary>
+    public event Action<(int Number, Point TopLeft)[]>? MineArranged;
+
+    private MonitorRect[] _mine = Glissando.Layout.MyMonitors();
+    public MonitorRect[] Mine
+    {
+        get => _mine;
+        set { _mine = value; _pending = null; Invalidate(); }
+    }
     public MonitorRect[] Peer { get; set; } = [];
     public string OtherName { get; set; } = "Other PC";
+
+    /// <summary>Screens moved on their own (see Layout); null = none.</summary>
+    public Point[]? MineShift { get; set; }
+    public Point[]? PeerShift { get; set; }
 
     /// <summary>The other PC is linked now. When it is not, its screens are the last ones it reported (or a
     /// guess), drawn faded so they do not pass for a live PC.</summary>
@@ -31,9 +47,14 @@ internal sealed class PlacementCanvas : Control
         set { _origin = value; Invalidate(); }
     }
 
-    private bool _dragging;
-    private Point _grab; // grab point relative to the peer origin, in world pixels
+    private enum DragKind { None, PeerAll, PeerOne, MineOne, MineAll }
+    private DragKind _drag;
+    private int _dragIndex;
+    private Point _grab; // grab point relative to what is dragged, in world pixels
+    private Point _minePos; // where the dragged screen of mine is, in world pixels
+    private (int index, Point pos)? _pending; // a screen of mine dropped and sent to Windows, until Mine updates
     private (float scale, PointF origin)? _dragView;
+    private Point _dragStartWorld, _dragStartOrigin; // where a drag of all of this PC's screens began
 
     public PlacementCanvas()
     {
@@ -43,15 +64,32 @@ internal sealed class PlacementCanvas : Control
         BackColor = Color.FromArgb(245, 245, 247);
     }
 
-    private Glissando.Layout Current => new(Mine, Peer, _origin);
+    private Glissando.Layout Current => new(Mine, Peer, _origin, MineShift, PeerShift);
+
+    /// <summary>My screens as drawn: the placement, with a screen being dragged (or just dropped) where it is now.</summary>
+    private MonitorRect[] MineDrawn()
+    {
+        var world = Current.MineInWorld();
+        (int index, Point pos)? moved = _drag == DragKind.MineOne ? (_dragIndex, _minePos) : _pending;
+        if (moved is { } m && m.index < world.Length)
+            world[m.index] = new MonitorRect(new Rectangle(m.pos, world[m.index].Bounds.Size), world[m.index].Number, world[m.index].Id);
+        return world;
+    }
 
     // World: my virtual screen at (0,0). The view fits both PCs with some air; it is frozen while
     // dragging so a snap to another side cannot make it jump under the mouse.
     private (float scale, PointF origin) View()
     {
-        if (_dragView is { } frozen) return frozen;
+        if (_dragView is { } frozen)
+        {
+            // Dragging this PC's screens moves the other PC the opposite way; draw it so the other PC stays put
+            // and this PC's screens follow the mouse.
+            if (_drag != DragKind.MineAll) return frozen;
+            return (frozen.scale, new PointF(frozen.origin.X - (_origin.X - _dragStartOrigin.X) * frozen.scale,
+                frozen.origin.Y - (_origin.Y - _dragStartOrigin.Y) * frozen.scale));
+        }
         var layout = Current;
-        var union = Rectangle.Union(layout.MyBounds, layout.PeerBounds);
+        var union = Rectangle.Union(layout.MyWorldBounds, layout.PeerBounds);
         if (union.IsEmpty) union = new Rectangle(0, 0, 1920, 1080);
         float legend = Compact ? 4 : 20, hint = Compact ? 4 : 18;
         float margin = (Compact ? 0.08f : 0.18f) * Math.Max(union.Width, union.Height);
@@ -77,6 +115,8 @@ internal sealed class PlacementCanvas : Control
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         var (scale, origin) = View();
         var layout = Current;
+        var mineDrawn = MineDrawn();
+        bool mineMoved = _drag == DragKind.MineOne || _pending != null;
 
         using var mineBrush = new SolidBrush(Color.FromArgb(30, 32, 46));
         bool offline = !Compact && !PeerLinked;
@@ -89,28 +129,32 @@ internal sealed class PlacementCanvas : Control
         using var tileBorder = new Pen(Color.FromArgb(245, 245, 247), 1.5f);
         var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
 
-        // Dashed outline of each PC's virtual desktop, then the monitors as tiles.
-        var mineBox = ToCanvas(layout.MyBounds, scale, origin);
+        // Dashed outline of each PC's desktop (left out where its screens stand apart), then the monitors as tiles.
+        var mineBox = ToCanvas(Glissando.Layout.Union(mineDrawn), scale, origin);
         var peerBox = ToCanvas(layout.PeerBounds, scale, origin);
-        g.DrawRectangle(outline, mineBox.X, mineBox.Y, mineBox.Width, mineBox.Height);
-        g.DrawRectangle(outline, peerBox.X, peerBox.Y, peerBox.Width, peerBox.Height);
+        if (!(MineShift?.Any(p => p != Point.Empty) ?? false))
+            g.DrawRectangle(outline, mineBox.X, mineBox.Y, mineBox.Width, mineBox.Height);
+        if (!(PeerShift?.Any(p => p != Point.Empty) ?? false))
+            g.DrawRectangle(outline, peerBox.X, peerBox.Y, peerBox.Width, peerBox.Height);
 
-        DrawTiles(g, Mine, Point.Empty, mineBrush, tileBorder, white, numberFont, font, scale, origin, fmt,
+        DrawTiles(g, mineDrawn, mineBrush, tileBorder, white, numberFont, font, scale, origin, fmt,
             single: $"This PC\n{layout.MyBounds.Width} x {layout.MyBounds.Height}");
-        DrawTiles(g, Peer, _origin, peerBrush, tileBorder, white, numberFont, font, scale, origin, fmt,
+        DrawTiles(g, layout.PeerInMine(), peerBrush, tileBorder, white, numberFont, font, scale, origin, fmt,
             single: offline ? $"{OtherName}\nnot connected"
                 : Peer.Length == 1 && Peer[0].Number == 0 ? $"{OtherName}\n(size unknown)" : $"{OtherName}\n{layout.PeerBounds.Width} x {layout.PeerBounds.Height}");
 
-        // Every stretch of edge the cursor can cross.
+        // Every stretch of edge the cursor can cross (not while this PC's own screens are being rearranged:
+        // the crossings follow once Windows has them).
         using var reachable = new Pen(Color.FromArgb(76, 175, 80), 3f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-        foreach (var s in layout.CrossingSegments())
-        {
-            float f = (s.Side is Dir.Left or Dir.Right ? origin.X : origin.Y) + s.Fixed * scale;
-            float a = (s.Side is Dir.Left or Dir.Right ? origin.Y : origin.X) + s.From * scale;
-            float b = (s.Side is Dir.Left or Dir.Right ? origin.Y : origin.X) + s.To * scale;
-            if (s.Side is Dir.Left or Dir.Right) g.DrawLine(reachable, f, a, f, b);
-            else g.DrawLine(reachable, a, f, b, f);
-        }
+        if (!mineMoved)
+            foreach (var s in layout.CrossingSegments())
+            {
+                float f = (s.Side is Dir.Left or Dir.Right ? origin.X : origin.Y) + s.Fixed * scale;
+                float a = (s.Side is Dir.Left or Dir.Right ? origin.Y : origin.X) + s.From * scale;
+                float b = (s.Side is Dir.Left or Dir.Right ? origin.Y : origin.X) + s.To * scale;
+                if (s.Side is Dir.Left or Dir.Right) g.DrawLine(reachable, f, a, f, b);
+                else g.DrawLine(reachable, a, f, b, f);
+            }
 
         if (Compact) return;
 
@@ -120,30 +164,56 @@ internal sealed class PlacementCanvas : Control
         using var gray = new SolidBrush(Color.FromArgb(110, 110, 120));
         var left = new StringFormat(StringFormatFlags.NoWrap) { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center };
         var right = new StringFormat(StringFormatFlags.NoWrap) { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center };
-        g.DrawString(Mine.Length == 1 ? $"This PC: {layout.MyBounds.Width} x {layout.MyBounds.Height}" : $"This PC: {Mine.Length} screens",
-            small, legendMine, new RectangleF(6, 2, Width / 2f, 16), left);
-        string peerText = offline ? $"{OtherName}: not connected - last known screens"
-            : Peer.Length == 1 && Peer[0].Number == 0 ? $"{OtherName}: size unknown until linked"
+        // Each line shrinks to fit the canvas (the dialog may be narrow, the scaling large), and is cut short
+        // with "..." only if even the smallest size does not fit.
+        string mineText = Mine.Length == 1 ? $"This PC: {layout.MyBounds.Width} x {layout.MyBounds.Height}" : $"This PC: {Mine.Length} screens";
+        float mineW = FitString(g, mineText, small, legendMine, new RectangleF(6, 2, Width / 2f - 10, 16), left);
+        string peerText = offline ? $"{OtherName}: not connected"
+            : Peer.Length == 1 && Peer[0].Number == 0 ? $"{OtherName}: size unknown"
             : Peer.Length == 1 ? $"{OtherName}: {layout.PeerBounds.Width} x {layout.PeerBounds.Height}"
             : $"{OtherName}: {Peer.Length} screens";
-        g.DrawString(peerText, small, legendPeer, new RectangleF(Width / 2f - 60, 2, Width / 2f + 54, 16), right);
-        g.DrawString("Drag the blue screens to where they stand. Green = where the cursor crosses.",
-            small, gray, new RectangleF(0, Height - 18, Width, 16), fmt);
+        FitString(g, peerText, small, legendPeer, new RectangleF(6 + mineW + 12, 2, Width - mineW - 30, 16), right);
+        string hint = _pending != null ? "Moving this PC's screen in Windows..."
+            : "Left: drag a whole PC. Right: one screen. Green: the cursor crosses.";
+        FitString(g, hint, small, gray, new RectangleF(4, Height - 18, Width - 8, 16), fmt);
     }
 
-    private static void DrawTiles(Graphics g, MonitorRect[] tiles, Point offset, Brush fill, Pen border, Brush text,
+    /// <summary>Draws one line in the box, in a smaller font if it would not fit; returns the width it took.</summary>
+    private static float FitString(Graphics g, string text, Font font, Brush brush, RectangleF box, StringFormat fmt)
+    {
+        var f = font;
+        try
+        {
+            while (g.MeasureString(text, f).Width > box.Width && f.Size > 6f)
+            {
+                var smaller = new Font(f.FontFamily, f.Size - 0.5f);
+                if (!ReferenceEquals(f, font)) f.Dispose();
+                f = smaller;
+            }
+            using var cut = (StringFormat)fmt.Clone();
+            cut.Trimming = StringTrimming.EllipsisCharacter;
+            g.DrawString(text, f, brush, box, cut);
+            return Math.Min(box.Width, g.MeasureString(text, f).Width);
+        }
+        finally
+        {
+            if (!ReferenceEquals(f, font)) f.Dispose();
+        }
+    }
+
+    private static void DrawTiles(Graphics g, MonitorRect[] tiles, Brush fill, Pen border, Brush text,
         Font numberFont, Font font, float scale, PointF origin, StringFormat fmt, string single)
     {
-        foreach (var (bounds, number, _) in tiles)
+        foreach (var (world, number, _) in tiles)
         {
-            var world = bounds;
-            world.Offset(offset);
             var tile = ToCanvas(world, scale, origin);
             g.FillRectangle(fill, tile);
             g.DrawRectangle(border, tile.X, tile.Y, tile.Width, tile.Height);
-            if (tiles.Length == 1)
+            // A lone screen gets its description when there is room for it, with its number above when there is
+            // room for that too; otherwise, like every other tile, just the number (what Identify shows).
+            if (tiles.Length == 1 && tile.Width >= 90 && tile.Height >= 34)
             {
-                if (tile.Width >= 90 && tile.Height >= 34) g.DrawString(single, font, text, tile, fmt);
+                g.DrawString(number > 0 && tile.Height >= 56 ? $"{number}\n{single}" : single, font, text, tile, fmt);
             }
             else if (number > 0 && tile.Width > 18 && tile.Height > 18)
             {
@@ -155,29 +225,96 @@ internal sealed class PlacementCanvas : Control
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        if (Compact || e.Button != MouseButtons.Left || Peer.Length == 0) return;
+        if (Compact || e.Button is not (MouseButtons.Left or MouseButtons.Right) || _pending != null) return;
+        bool one = e.Button == MouseButtons.Right;
         var (scale, origin) = View();
         var w = ToWorld(e.Location, scale, origin);
-        var peerBox = Current.PeerBounds;
-        _dragging = true;
+        var layout = Current;
+        var peerWorld = layout.PeerInMine();
+        var mineWorld = layout.MineInWorld();
+        int peerHit = Array.FindIndex(peerWorld, m => m.Bounds.Contains(w));
+        int mineHit = Array.FindIndex(mineWorld, m => m.Bounds.Contains(w));
         _dragView = (scale, origin);
-        _grab = peerBox.Contains(w)
-            ? new Point(w.X - _origin.X, w.Y - _origin.Y)
-            : new Point(peerBox.X - _origin.X + peerBox.Width / 2, peerBox.Y - _origin.Y + peerBox.Height / 2);
         Capture = true;
+        if (one && peerHit >= 0 && Peer.Length > 1)
+        {
+            _drag = DragKind.PeerOne;
+            _dragIndex = peerHit;
+            _grab = new Point(w.X - peerWorld[peerHit].Bounds.X, w.Y - peerWorld[peerHit].Bounds.Y);
+        }
+        else if (one && peerHit < 0 && mineHit >= 0 && Mine.Length > 1)
+        {
+            _drag = DragKind.MineOne;
+            _dragIndex = mineHit;
+            _minePos = mineWorld[mineHit].Bounds.Location;
+            _grab = new Point(w.X - _minePos.X, w.Y - _minePos.Y);
+            return; // nothing moves until the mouse does
+        }
+        else if (one)
+        {
+            EndDrag(); // a single screen that cannot move on its own
+            return;
+        }
+        else if (peerHit < 0 && mineHit >= 0 && Peer.Length > 0)
+        {
+            _drag = DragKind.MineAll;
+            _dragStartWorld = w;
+            _dragStartOrigin = _origin;
+            return; // nothing moves until the mouse does
+        }
+        else if (Peer.Length > 0)
+        {
+            var peerBox = layout.PeerBounds;
+            _drag = DragKind.PeerAll;
+            _grab = peerBox.Contains(w)
+                ? new Point(w.X - _origin.X, w.Y - _origin.Y)
+                : new Point(peerBox.X - _origin.X + peerBox.Width / 2, peerBox.Y - _origin.Y + peerBox.Height / 2);
+        }
+        else
+        {
+            EndDrag();
+            return;
+        }
         Drag(e.Location);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        if (_dragging) Drag(e.Location);
+        if (_drag != DragKind.None) Drag(e.Location);
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
-        _dragging = false;
+        if (_drag == DragKind.MineOne)
+        {
+            var layout = Current;
+            var world = layout.MineInWorld();
+            if (_dragIndex < world.Length && _minePos != world[_dragIndex].Bounds.Location)
+            {
+                // Windows takes real positions: the dropped one less its shift (if the other PC moved it), the rest as they are.
+                var shift = layout.MyShiftAt(_dragIndex);
+                var moves = Mine.Select((m, i) => (m.Number, i == _dragIndex ? new Point(_minePos.X - shift.X, _minePos.Y - shift.Y) : m.Bounds.Location)).ToArray();
+                _pending = (_dragIndex, _minePos);
+                EndDrag();
+                MineArranged?.Invoke(moves);
+                return;
+            }
+        }
+        EndDrag();
+    }
+
+    /// <summary>Windows did not take the new arrangement: draw this PC's screens where they are.</summary>
+    public void CancelArrangement()
+    {
+        _pending = null;
+        Invalidate();
+    }
+
+    private void EndDrag()
+    {
+        _drag = DragKind.None;
         _dragView = null;
         Capture = false;
         Invalidate();
@@ -185,23 +322,79 @@ internal sealed class PlacementCanvas : Control
 
     private void Drag(Point canvasPoint)
     {
-        var (scale, origin) = View();
+        var (scale, origin) = _dragView ?? View();
         var w = ToWorld(canvasPoint, scale, origin);
         var proposed = new Point(w.X - _grab.X, w.Y - _grab.Y);
         // Align edges when they are within about eight canvas pixels of each other.
-        var snapped = Glissando.Layout.Snap(Mine, Peer, proposed, 64, (int)Math.Max(16, 8 / scale));
-        if (snapped != _origin)
+        int tolerance = (int)Math.Max(16, 8 / scale);
+        var layout = Current;
+        switch (_drag)
         {
-            _origin = snapped;
-            Invalidate();
-            PlacementChanged?.Invoke();
+            case DragKind.PeerAll:
+            {
+                var snapped = Glissando.Layout.Snap(layout.MineInWorld(), Glissando.Layout.Shift(Peer, PeerShift), proposed, 64, tolerance);
+                if (snapped == _origin) return;
+                _origin = snapped;
+                break;
+            }
+            case DragKind.MineAll:
+            {
+                // This PC's screens follow the mouse, which is the other PC moving the opposite way.
+                var moved = new Point(_dragStartOrigin.X - (w.X - _dragStartWorld.X), _dragStartOrigin.Y - (w.Y - _dragStartWorld.Y));
+                var snapped = Glissando.Layout.Snap(layout.MineInWorld(), Glissando.Layout.Shift(Peer, PeerShift), moved, 64, tolerance);
+                if (snapped == _origin) return;
+                _origin = snapped;
+                break;
+            }
+            case DragKind.PeerOne:
+            {
+                // Flush against one of this PC's screens or another of its own, overlapping none.
+                var peerWorld = layout.PeerInMine();
+                var others = layout.MineInWorld().Select(m => m.Bounds)
+                    .Concat(peerWorld.Where((_, i) => i != _dragIndex).Select(m => m.Bounds)).ToArray();
+                if (Glissando.Layout.SnapRect(peerWorld[_dragIndex].Bounds.Size, others, others, proposed, tolerance) is not Point at
+                    || at == peerWorld[_dragIndex].Bounds.Location) return;
+                var shifts = Enumerable.Range(0, Peer.Length).Select(layout.PeerShiftAt).ToArray();
+                var real = Peer[_dragIndex].Bounds.Location;
+                shifts[_dragIndex] = new Point(at.X - real.X - _origin.X, at.Y - real.Y - _origin.Y);
+                PeerShift = shifts.Any(p => p != Point.Empty) ? shifts : null;
+                break;
+            }
+            case DragKind.MineOne:
+            {
+                // Flush against another of this PC's screens, as Windows wants them.
+                var others = layout.MineInWorld().Where((_, i) => i != _dragIndex).Select(m => m.Bounds).ToArray();
+                if (Glissando.Layout.SnapRect(Mine[_dragIndex].Bounds.Size, others, others, proposed, tolerance) is not Point at || at == _minePos) return;
+                _minePos = at;
+                Invalidate();
+                return; // nothing is placed until Windows has it
+            }
+            default:
+                return;
         }
+        Invalidate();
+        PlacementChanged?.Invoke();
+    }
+
+    /// <summary>The other PC's screens back together as its Windows arranges them, where its first screen stands now.</summary>
+    public void JoinPeerScreens()
+    {
+        if (PeerShift == null) return;
+        var layout = Current;
+        var keep = layout.PeerShiftAt(0);
+        PeerShift = null;
+        _origin = Glissando.Layout.Snap(layout.MineInWorld(), Peer, new Point(_origin.X + keep.X, _origin.Y + keep.Y));
+        Invalidate();
+        PlacementChanged?.Invoke();
     }
 }
 
 internal sealed class SettingsForm : Form
 {
     public event Action<Settings>? Saved;
+
+    /// <summary>Identify was clicked: ask the other PC to show its numbers too. Returns null when it could, else why not.</summary>
+    public event Func<string?>? IdentifyRequested;
 
     private readonly Settings _s;
     private readonly bool _firstRun;
@@ -229,7 +422,10 @@ internal sealed class SettingsForm : Form
     // The placement as it stood when the dialog opened, or as Glissando itself last set it while the dialog was
     // open (Reload): anything else on the canvas at Save is the user's edit, and only that gets a new timestamp.
     private Point _originalOrigin;
+    private string _originalShifts = "";
     private bool _syncing;
+    private readonly Button _join = new() { Text = "Join its screens", AutoSize = true, Margin = new Padding(6, 0, 0, 0) };
+    private readonly Label _identifyNote = new() { AutoSize = true, MaximumSize = new Size(TextWidth - 90, 0), ForeColor = SystemColors.GrayText, Padding = new Padding(6, 0, 0, 0) };
 
     // Text width for wrapped option labels and notes: the tab page minus padding, at 100 % scaling (the
     // form's Dpi auto-scaling scales it along with everything else).
@@ -242,6 +438,7 @@ internal sealed class SettingsForm : Form
         _peerName = peerName;
         var initial = Glissando.Layout.FromSettings(working);
         _originalOrigin = initial.PeerOrigin;
+        _originalShifts = ShiftsText(initial);
 
         Text = (firstRun ? "Glissando setup" : "Glissando settings") + $"  ({Program.VersionLong})";
         // Resizable, never taller than the screen; each tab scrolls on its own if it must. The fixed 800 px
@@ -358,6 +555,8 @@ internal sealed class SettingsForm : Form
         var page = Page("Screens", out var layout, fill: true);
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // header
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));   // canvas
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // identify, join
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // how to move
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // fields
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));       // which desk this is
 
@@ -366,10 +565,32 @@ internal sealed class SettingsForm : Form
         _canvas.Peer = initial.Peer;
         _canvas.OtherName = string.IsNullOrEmpty(_peerName) ? "Other PC" : _peerName;
         _canvas.PeerOrigin = initial.PeerOrigin;
+        _canvas.MineShift = initial.MineShift;
+        _canvas.PeerShift = initial.PeerShift;
         _canvas.PlacementChanged += () => SyncFromCanvas();
+        _canvas.MineArranged += ArrangeMine;
         var canvasHost = new Panel { Dock = DockStyle.Fill, MinimumSize = new Size(0, 150), Margin = new Padding(0, 2, 0, 4), BorderStyle = BorderStyle.FixedSingle };
         canvasHost.Controls.Add(_canvas);
         layout.Controls.Add(canvasHost);
+
+        // Which screen is which: the numbers on the tiles, shown big on the screens themselves (as Identify in
+        // Windows' Display settings), on both PCs.
+        var toolRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 0, 0, 2) };
+        var identify = new Button { Text = "Identify", AutoSize = true };
+        identify.Click += (_, _) =>
+        {
+            IdentifyOverlay.ShowAll(otherPc: false);
+            _identifyNote.Text = IdentifyRequested is { } ask ? ask() ?? "" : "The other PC is not linked: only this PC's numbers.";
+        };
+        toolRow.Controls.Add(identify);
+        _join.Click += (_, _) => { _canvas.JoinPeerScreens(); UpdateJoin(); };
+        _tips.SetToolTip(_join, "Put the other PC's screens back together as its Windows arranges them");
+        toolRow.Controls.Add(_join);
+        toolRow.Controls.Add(_identifyNote);
+        layout.Controls.Add(toolRow);
+        UpdateJoin();
+        layout.Controls.Add(Note("Left button: drag all the blue screens (the other PC) or all the dark ones (this PC) together. "
+            + "Right button: drag one screen - one of the other PC's on its own, or one of this PC's, which rearranges them in Windows as Display settings does."));
 
         var placeRow = new FlowLayoutPanel { AutoSize = true, Margin = new Padding(0, 0, 0, 6) };
         placeRow.Controls.Add(new Label { Text = "Other PC's top-left corner, in this PC's pixels:  X", AutoSize = true, Padding = new Padding(0, 6, 4, 0) });
@@ -422,6 +643,8 @@ internal sealed class SettingsForm : Form
         {
             if (_selectedSetup == null || !_s.Placements.TryGetValue(_selectedSetup, out var p)) return;
             _canvas.PeerOrigin = new Point(p.PeerX, p.PeerY);
+            _canvas.MineShift = Glissando.Layout.ParseShifts(_canvas.Mine, p.MyShifts);
+            _canvas.PeerShift = Glissando.Layout.ParseShifts(_canvas.Peer, p.PeerShifts);
             SyncFromCanvas();
             _setupNow.Text = $"Placement of {(p.Name != "" ? $"\"{p.Name}\"" : "the selected desk")} applied on the Screens tab - Save to keep it for this desk.";
         };
@@ -548,7 +771,8 @@ internal sealed class SettingsForm : Form
             bool isCurrent = key == current, isSelected = key == _selectedSetup;
             var tile = new Panel { Width = S(150), Height = S(90) + captionH, Margin = new Padding(0, 0, S(8), S(8)), Padding = new Padding(S(2)), Cursor = Cursors.Hand, Tag = key,
                 BackColor = isSelected ? Color.FromArgb(66, 133, 244) : isCurrent ? Color.FromArgb(76, 175, 80) : Color.FromArgb(200, 200, 205) };
-            var thumb = new PlacementCanvas { Compact = true, Mine = mine, Peer = peer, PeerOrigin = new Point(kv.Value.PeerX, kv.Value.PeerY), OtherName = name, Dock = DockStyle.Fill, Cursor = Cursors.Hand };
+            var thumb = new PlacementCanvas { Compact = true, Mine = mine, Peer = peer, PeerOrigin = new Point(kv.Value.PeerX, kv.Value.PeerY), OtherName = name, Dock = DockStyle.Fill, Cursor = Cursors.Hand,
+                MineShift = Glissando.Layout.ParseShifts(mine, kv.Value.MyShifts), PeerShift = Glissando.Layout.ParseShifts(peer, kv.Value.PeerShifts) };
             var when = DateTimeOffset.FromUnixTimeMilliseconds(kv.Value.Updated).ToLocalTime();
             string title = kv.Value.Name != "" ? kv.Value.Name : $"{mine.Length} + {peer.Length} screens";
             var caption = new Label { Dock = DockStyle.Bottom, Height = captionH, BackColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Font = tileFont, Cursor = Cursors.Hand, AutoEllipsis = true,
@@ -592,15 +816,23 @@ internal sealed class SettingsForm : Form
     public void Reload(Settings current, string peerName)
     {
         var now = Glissando.Layout.FromSettings(current);
+        // This PC's screens rearranged (perhaps from this tab) or the other PC's changed: the shifts of the old
+        // lists mean nothing for the new ones, so the placement comes from the settings as a whole.
+        bool screensChanged = Glissando.Layout.MonitorSignature(now.Mine) != Glissando.Layout.MonitorSignature(_canvas.Mine)
+            || Glissando.Layout.MonitorSignature(now.Peer) != Glissando.Layout.MonitorSignature(_canvas.Peer);
+        _canvas.Mine = now.Mine;
         _canvas.Peer = now.Peer;
         if (!string.IsNullOrEmpty(peerName)) _canvas.OtherName = peerName;
-        if (now.PeerOrigin != _originalOrigin)
+        if (now.PeerOrigin != _originalOrigin || ShiftsText(now) != _originalShifts || screensChanged)
         {
             // Not an edit of the user's: a desk recalled when the other PC said hello, or its newer placement.
             // Counted as one, a Save for something else (a new passphrase on RS, 2026-10-09 05:27) stamped it
             // as just edited, sent it over as the newest, and it replaced the desk's placement on both PCs.
             _originalOrigin = now.PeerOrigin;
+            _originalShifts = ShiftsText(now);
             _canvas.PeerOrigin = now.PeerOrigin;
+            _canvas.MineShift = now.MineShift;
+            _canvas.PeerShift = now.PeerShift;
             SyncFromCanvas();
         }
         _canvas.Invalidate();
@@ -608,8 +840,30 @@ internal sealed class SettingsForm : Form
         RefreshSetups();
     }
 
+    private static string ShiftsText(Glissando.Layout l) =>
+        Glissando.Layout.FormatShifts(l.Peer, l.PeerShift) + "|" + Glissando.Layout.FormatShifts(l.Mine, l.MineShift);
+
+    private string CanvasShiftsText() =>
+        Glissando.Layout.FormatShifts(_canvas.Peer, _canvas.PeerShift) + "|" + Glissando.Layout.FormatShifts(_canvas.Mine, _canvas.MineShift);
+
+    private void UpdateJoin() => _join.Visible = _canvas.PeerShift != null;
+
+    /// <summary>One of this PC's screens was dropped somewhere new on the canvas: move it in Windows. The display
+    /// change that follows brings the new arrangement back here (Reload), the other PC carried along by the screen
+    /// it stands beside.</summary>
+    private void ArrangeMine((int Number, Point TopLeft)[] moves)
+    {
+        Log.Info("rearranging this PC's screens from the Screens tab: " + string.Join(", ", moves.Select(m => $"{m.Number}@({m.TopLeft.X},{m.TopLeft.Y})")));
+        var error = DisplayArrangement.Apply(moves);
+        if (error == null) return;
+        Log.Warn("display arrangement: " + error);
+        _canvas.CancelArrangement();
+        MessageBox.Show(this, "Could not rearrange the screens: " + error, "Glissando", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+
     private void SyncFromCanvas()
     {
+        UpdateJoin();
         if (_syncing) return;
         _syncing = true;
         _peerX.Value = Math.Clamp(_canvas.PeerOrigin.X, (int)_peerX.Minimum, (int)_peerX.Maximum);
@@ -638,11 +892,14 @@ internal sealed class SettingsForm : Form
         }
         _s.Passphrase = pass;
         _s.Ble = (BleMode)_ble.SelectedIndex;
-        if (_canvas.PeerOrigin != _originalOrigin || _s.PeerX == null)
+        bool edited = _canvas.PeerOrigin != _originalOrigin || CanvasShiftsText() != _originalShifts;
+        if (edited || _s.PeerX == null)
         {
             _s.PeerX = _canvas.PeerOrigin.X;
             _s.PeerY = _canvas.PeerOrigin.Y;
-            if (_canvas.PeerOrigin != _originalOrigin) _s.PlacementUpdated = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _s.PeerShifts = Glissando.Layout.FormatShifts(_canvas.Peer, _canvas.PeerShift);
+            _s.MyShifts = Glissando.Layout.FormatShifts(_canvas.Mine, _canvas.MineShift);
+            if (edited) _s.PlacementUpdated = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
         _s.RememberPlacement(CurrentSetupKey());
         _s.CaptureEnabled = _capture.Checked;

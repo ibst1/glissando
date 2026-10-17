@@ -15,7 +15,7 @@ public class ProtocolTests
             new(new Rectangle(2560, 0, 1920, 1200), 4),
         ];
         var info = new HelloInfo(true, new Point(-640, 0), new Size(7680, 2640), 1234567890123, nonce, monitors, "Lärkan", "0.3.9+abc1234.dirty",
-            DeskName: "Hemma", DeskNameUpdated: 42, ReceiverView: 0xDEADBEEF);
+            DeskName: "Hemma", DeskNameUpdated: 42, ReceiverView: 0xDEADBEEF, PeerShifts: "DEL%2F1=10,-20", MyShifts: "#2=0,1080");
 
         var frame = Frame.Hello(info);
         Assert.True(Frame.TryDecode(frame.Encode(), out var decoded));
@@ -33,6 +33,16 @@ public class ProtocolTests
         Assert.Equal("Hemma", parsed.DeskName);
         Assert.Equal(42, parsed.DeskNameUpdated);
         Assert.Equal(0xDEADBEEFu, parsed.ReceiverView);
+        Assert.Equal("DEL%2F1=10,-20", parsed.PeerShifts);
+        Assert.Equal("#2=0,1080", parsed.MyShifts);
+    }
+
+    [Fact]
+    public void Identify_IsAnEmptyFrame()
+    {
+        Assert.True(Frame.TryDecode(Frame.Identify().Encode(), out var f));
+        Assert.Equal(FrameType.Identify, f.Type);
+        Assert.Empty(f.Payload);
     }
 
     [Fact]
