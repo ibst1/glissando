@@ -27,6 +27,7 @@ internal static class Program
             Console.WriteLine("  bttest list                 show local radio and paired devices");
             Console.WriteLine("  bttest listen               echo server (run on one PC)");
             Console.WriteLine("  bttest connect <address>    run latency tests against the listener");
+            Console.WriteLine("  bttest blemesh [seconds]    run on every PC: link each to each over BLE, ping all links every round");
             return 1;
         }
 
@@ -47,6 +48,8 @@ internal static class Program
                     return Connect(args[1], runs);
                 case "blescan":
                     return Ble.Scan(args.Length > 1 ? int.Parse(args[1]) : 15).GetAwaiter().GetResult();
+                case "blemesh":
+                    return Mesh.Run(args.Length > 1 ? int.Parse(args[1]) : 30).GetAwaiter().GetResult();
                 case "bleserve":
                     return Ble.Serve().GetAwaiter().GetResult();
                 case "bleconnect":
