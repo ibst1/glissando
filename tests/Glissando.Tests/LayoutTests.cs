@@ -293,11 +293,90 @@ public class DeskForMyScreensTests
     }
 
     [Fact]
+    public void RearrangedWhileAway_BorrowedPeerSide_MakesADeskOfItsOwn()
+    {
+        // The laptop panel moved right on the Screens tab while RS was away: the other PC's side comes from the
+        // desk found, this PC's from the screens as they stand - a new desk, not the old arrangement's key.
+        var moved = Home.Select(m => m.Id == "L" ? m with { Bounds = m.Bounds with { X = 4000 } } : m).ToArray();
+        string old = Layout.SetupKey(Home, "RS", PeerOffice);
+        var desk = Layout.DeskForMyScreens([(old, "Klinik", 5L)], moved, "");
+        Assert.Equal(old, desk);
+        Assert.True(Layout.TryParseSetupKey(desk!, out _, out var name, out var peer));
+        string key = Layout.SetupKey(moved, name, peer);
+        Assert.NotEqual(old, key);
+        Assert.Equal(Layout.SetupKey(moved, "RS", PeerOffice), key);
+        Assert.True(Layout.SameScreens(old, key));
+    }
+
+    [Fact]
     public void UnknownScreensOrOtherPeer_Null()
     {
         string home = Layout.SetupKey(Home, "RS", PeerLaptop);
         Assert.Null(Layout.DeskForMyScreens([(home, "", 1L)], LaptopAlone, "RS"));
         Assert.Null(Layout.DeskForMyScreens([(home, "", 1L)], Home, "SOMEONE"));
         Assert.Equal(home, Layout.DeskForMyScreens([(home, "", 1L)], Home, ""));   // before any hello this run
+    }
+}
+
+public class ArrangementToRestoreTests
+{
+    // The clinic desk: a 1080p screen, two 4K screens and the laptop's own panel under the 4K row.
+    private static readonly MonitorRect[] Desk =
+    [
+        new(new Rectangle(1920, 0, 3840, 2160), 3, "A"),
+        new(new Rectangle(5760, 0, 3840, 2160), 4, "B"),
+        new(new Rectangle(0, 1080, 1920, 1080), 2, "C"),
+        new(new Rectangle(2599, 2160, 1920, 1200), 1, "L"),
+    ];
+    // After sleep (2026-10-18): renumbered, and the panel top right.
+    private static readonly MonitorRect[] Woke =
+    [
+        new(new Rectangle(1920, 0, 3840, 2160), 2, "A"),
+        new(new Rectangle(5760, 0, 3840, 2160), 3, "B"),
+        new(new Rectangle(9600, 0, 1920, 1200), 4, "L"),
+        new(new Rectangle(0, 1080, 1920, 1080), 1, "C"),
+    ];
+    private static readonly MonitorRect[] Peer = [new(new Rectangle(0, 0, 1920, 1200), 1, "R")];
+    private static readonly string DeskKey = Layout.SetupKey(Desk, "LU", Peer);
+    private static readonly string ThreeScreens = Layout.SetupKey(Desk.Take(3).ToArray(), "LU", Peer);
+
+    [Fact]
+    public void ScreensBackElsewhere_MovedBackByNumber()
+    {
+        var moves = Layout.ArrangementToRestore([(DeskKey, 5L)], Woke, ThreeScreens);
+        Assert.NotNull(moves);
+        Assert.Contains((4, new Point(2599, 2160)), moves!);
+        Assert.Contains((1, new Point(0, 1080)), moves!);
+        Assert.Contains((2, new Point(1920, 0)), moves!);
+    }
+
+    [Fact]
+    public void SameScreensRearranged_LeftAlone()
+    {
+        Assert.Null(Layout.ArrangementToRestore([(DeskKey, 5L)], Woke, DeskKey));
+    }
+
+    [Fact]
+    public void LastUsedArrangementWins()
+    {
+        string wokeKey = Layout.SetupKey(Woke, "LU", Peer);
+        Assert.Null(Layout.ArrangementToRestore([(DeskKey, 5L), (wokeKey, 9L)], Woke, ThreeScreens));
+        Assert.NotNull(Layout.ArrangementToRestore([(DeskKey, 9L), (wokeKey, 5L)], Woke, ThreeScreens));
+    }
+
+    [Fact]
+    public void AlreadyInPlace_ShiftedOrigin_Null()
+    {
+        var shifted = Desk.Select(m => m with { Bounds = m.Bounds with { X = m.Bounds.X + 100 } }).ToArray();
+        Assert.Null(Layout.ArrangementToRestore([(DeskKey, 5L)], shifted, ThreeScreens));
+    }
+
+    [Fact]
+    public void UnknownIdentityOrResized_Null()
+    {
+        var noId = Woke.Select(m => m.Id == "L" ? m with { Id = "" } : m).ToArray();
+        Assert.Null(Layout.ArrangementToRestore([(DeskKey, 5L)], noId, ThreeScreens));
+        var resized = Woke.Select(m => m.Id == "L" ? m with { Bounds = m.Bounds with { Width = 1280, Height = 800 } } : m).ToArray();
+        Assert.Null(Layout.ArrangementToRestore([(DeskKey, 5L)], resized, ThreeScreens));
     }
 }

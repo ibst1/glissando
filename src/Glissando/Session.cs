@@ -219,17 +219,23 @@ public sealed class Session : IDisposable
     private void ReconcilePlacement(string why)
     {
         var mine = Layout.MyMonitors();
+        if (why != "start" && RestoreArrangement(mine)) return;
         var key = Layout.SetupKey(mine, PeerName ?? "", _s.OtherMonitorList);
         bool peerSwapped = false;
+        string? borrowed = null;
         if (!Authenticated && !_s.Placements.ContainsKey(key))
         {
             // The other PC is not here to say what it has: go by this PC's screens (see DeskForMyScreens).
             var desk = Layout.DeskForMyScreens(_s.Placements.Select(kv => (kv.Key, kv.Value.Name, kv.Value.Updated)), mine, PeerName ?? "");
-            if (desk != null && Layout.TryParseSetupKey(desk, out _, out _, out var peerThere))
+            if (desk != null && Layout.TryParseSetupKey(desk, out _, out var nameThere, out var peerThere))
             {
                 peerSwapped = !peerThere.SequenceEqual(_s.OtherMonitorList);
                 _s.OtherMonitorList = peerThere;
-                key = desk;
+                // Only the other PC's side comes from that desk; this PC's screens are as they stand. Taking the
+                // whole key filed a rearrangement made while the other PC was away under the old arrangement, and
+                // every start moved the screens back to it (2026-10-21).
+                key = Layout.SetupKey(mine, nameThere, peerThere);
+                borrowed = desk;
             }
         }
         if (key == _setupKey) return;
@@ -238,9 +244,10 @@ public sealed class Session : IDisposable
         if (_s.RecallPlacement(key, out bool changed))
         {
             Log.Info($"screen setup ({why}): recalled placement, other PC at ({_s.PeerX},{_s.PeerY}){(changed ? "" : " (as now)")}");
+            _s.MarkUsed(key);
+            try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
             if (!changed && !peerSwapped) return;
             RebuildLayout();
-            try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
             SettingsChanged?.Invoke();
             if (Linked) SendHello();
         }
@@ -248,7 +255,8 @@ public sealed class Session : IDisposable
         {
             // Not seen in this exact arrangement. If exactly one remembered desk has the same physical screens
             // on both PCs, it is almost certainly this desk (a monitor renumbered or nudged): take its placement.
-            // With several candidates, do not guess - keep the current placement and let the Desks tab offer them.
+            // With several candidates, do not guess - keep the current placement and let the Desks tab offer them -
+            // unless the other PC's side was just borrowed from one of them (DeskForMyScreens chose it).
             var matches = _s.Placements.Keys.Where(k => k != key && Layout.SameScreens(k, key)).ToArray();
             // Straight from a desk with the same screens (a screen renumbered when a PC restarted, nudged by Windows,
             // or rearranged from the Screens tab): this is still that desk, and the placement in use - the newest -
@@ -256,12 +264,13 @@ public sealed class Session : IDisposable
             // other PC out of the corner it had just been put in, and sent that over as if it were the edit
             // (2026-10-17).
             bool sameDeskAsBefore = Layout.IsCompleteSetupKey(previous) && Layout.SameScreens(previous, key);
-            if (matches.Length == 1 && !sameDeskAsBefore)
+            string? pick = matches.Length == 1 ? matches[0] : borrowed != null && matches.Contains(borrowed) ? borrowed : null;
+            if (pick != null && !sameDeskAsBefore)
             {
-                var only = _s.Placements[matches[0]];
+                var only = _s.Placements[pick];
                 // Same panels, moved (rearranged in Display settings, perhaps from Glissando's own Screens tab): the
                 // other PC still stands beside the panel it stood beside, so carry the placement by that panel.
-                var carriedOrigin = Layout.CarryPlacement(new Point(only.PeerX, only.PeerY), matches[0], key) ?? new Point(only.PeerX, only.PeerY);
+                var carriedOrigin = Layout.CarryPlacement(new Point(only.PeerX, only.PeerY), pick, key) ?? new Point(only.PeerX, only.PeerY);
                 _s.PeerX = carriedOrigin.X; _s.PeerY = carriedOrigin.Y; _s.PlacementUpdated = only.Updated;
                 _s.PeerShifts = only.PeerShifts; _s.MyShifts = only.MyShifts;
                 _s.RememberPlacement(key);
@@ -303,6 +312,29 @@ public sealed class Session : IDisposable
                 if (Linked) SendHello();
             }
         }
+    }
+
+    private string _restoreTried = "";
+    private long _restoreTriedAt;
+
+    /// <summary>This PC's screens came back in another arrangement than when last in use (Windows after sleep):
+    /// put them back in Windows. True when a move was made; the display change it causes brings the restored
+    /// arrangement back here, and its desk with it. Tried once per arrangement a minute, so a Windows that will not
+    /// take it cannot loop.</summary>
+    private bool RestoreArrangement(MonitorRect[] mine)
+    {
+        var moves = Layout.ArrangementToRestore(_s.Placements.Select(kv => (kv.Key, kv.Value.Used != 0 ? kv.Value.Used : kv.Value.Updated)), mine, _setupKey);
+        if (moves == null) return false;
+        string sig = Layout.MonitorSignature(mine);
+        long now = Environment.TickCount64;
+        if (sig == _restoreTried && now - _restoreTriedAt < 60_000) return false;
+        _restoreTried = sig; _restoreTriedAt = now;
+        Log.Info("screen setup: this PC's screens are back, but not where they were when last in use; moving them back in Windows: "
+            + string.Join(", ", moves.Select(m => $"{m.Number}@({m.TopLeft.X},{m.TopLeft.Y})")));
+        var error = DisplayArrangement.Apply(moves);
+        if (error == null) return true;
+        Log.Warn("display arrangement: " + error);
+        return false;
     }
 
     public Session(Settings s, IChannel channel, InputCapture capture, InputInjector injector, IClipboardAccess clipboard)

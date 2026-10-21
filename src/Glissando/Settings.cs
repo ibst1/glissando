@@ -23,6 +23,9 @@ public sealed class SavedPlacement
     public string Name { get; set; } = "";
     /// <summary>Unix ms when the name was last set, for the newest-wins sync.</summary>
     public long NameUpdated { get; set; }
+    /// <summary>Unix ms when this desk was last the one in use: which arrangement of the same screens to bring
+    /// back when Windows comes back from sleep with them somewhere else (see Layout.ArrangementToRestore).</summary>
+    public long Used { get; set; }
 }
 
 public sealed class Settings
@@ -158,7 +161,13 @@ public sealed class Settings
     {
         if (PeerX is not int x || PeerY is not int y || !Layout.IsCompleteSetupKey(key)) return;
         Placements.TryGetValue(key, out var old);
-        Placements[key] = new SavedPlacement { PeerX = x, PeerY = y, PeerShifts = PeerShifts, MyShifts = MyShifts, Updated = PlacementUpdated, Name = old?.Name ?? "", NameUpdated = old?.NameUpdated ?? 0 };
+        Placements[key] = new SavedPlacement { PeerX = x, PeerY = y, PeerShifts = PeerShifts, MyShifts = MyShifts, Updated = PlacementUpdated, Name = old?.Name ?? "", NameUpdated = old?.NameUpdated ?? 0, Used = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() };
+    }
+
+    /// <summary>This desk is the one in use now.</summary>
+    public void MarkUsed(string key)
+    {
+        if (Placements.TryGetValue(key, out var p)) p.Used = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
     }
 
     /// <summary>After a few minutes without input, ping only every 10 s so the BLE link can idle (first move after that is slower).</summary>

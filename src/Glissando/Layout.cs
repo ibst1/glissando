@@ -533,6 +533,36 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         return an == bn && SameSet(am, bm) && SameSet(ap, bp);
     }
 
+    /// <summary>
+    /// This PC's screens came back (from sleep, a dock, a lid opened) in an arrangement other than the one they
+    /// had when last in use: the moves, by Windows screen number, that put them back. Windows woke on 2026-10-18
+    /// with the laptop's own panel top right instead of under the big screens, and the other PC on the Screens tab
+    /// beside nothing. Only when the set of screens changed since <paramref name="previousKey"/> - a rearrangement
+    /// of the same screens is the user's doing and stays - and every screen is known by its EDID identity and
+    /// still has its size. The desk last in use with exactly these screens decides; null when it already matches.
+    /// </summary>
+    public static (int Number, Point TopLeft)[]? ArrangementToRestore(IEnumerable<(string Key, long Used)> desks, MonitorRect[] mine, string previousKey)
+    {
+        if (mine.Length == 0 || mine.Any(m => m.Id == "") || mine.Select(m => m.Id).Distinct().Count() != mine.Length) return null;
+        if (!TryParseSetupKey(previousKey, out var before, out _, out _) || SameSet(before, mine)) return null;
+        var last = desks
+            .Select(d => (d.Used, Mine: TryParseSetupKey(d.Key, out var m, out _, out _) ? m : []))
+            .Where(d => SameSet(d.Mine, mine) && mine.All(n => d.Mine.Any(o => o.Id == n.Id && o.Bounds.Size == n.Bounds.Size)))
+            .OrderByDescending(d => d.Used)
+            .Select(d => d.Mine)
+            .FirstOrDefault();
+        if (last == null) return null;
+        // Positions relative to each arrangement's own top-left, so a shifted origin alone is no change.
+        static Point Corner(MonitorRect[] r) => new(r.Min(m => m.Bounds.X), r.Min(m => m.Bounds.Y));
+        Point now = Corner(mine), then = Corner(last);
+        var moves = mine.Select(n =>
+        {
+            var o = last.First(m => m.Id == n.Id).Bounds;
+            return (n.Number, TopLeft: new Point(o.X - then.X + now.X, o.Y - then.Y + now.Y), Moved: o.X - then.X != n.Bounds.X - now.X || o.Y - then.Y != n.Bounds.Y - now.Y);
+        }).ToArray();
+        return moves.Any(m => m.Moved) ? moves.Select(m => (m.Number, m.TopLeft)).ToArray() : null;
+    }
+
     private static bool SameSet(MonitorRect[] x, MonitorRect[] y)
     {
         if (x.Length != y.Length) return false;
