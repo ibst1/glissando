@@ -90,7 +90,17 @@ internal static class Program
         // If the cursor set was swapped out while controlling the other PC, or a mirrored window was made
         // invisible, put them back no matter how we end.
         AppDomain.CurrentDomain.ProcessExit += (_, _) => { Host.CursorHider.RestoreAll(); Mirror.WindowHider.UnhideAll(); };
-        AppDomain.CurrentDomain.UnhandledException += (_, _) => { Host.CursorHider.RestoreAll(); Mirror.WindowHider.UnhideAll(); };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            Log.Error("fatal (unhandled): " + e.ExceptionObject);
+            Host.CursorHider.RestoreAll();
+            Mirror.WindowHider.UnhideAll();
+        };
+        // An exception in a window event, a timer or an Invoke never reaches the catch around Application.Run:
+        // WinForms shows its own "Unhandled exception" box instead, and the stack trace is lost with it. That box
+        // sat on screen unclosable while the desktop seemed locked (2026-10-27). Log it and carry on, as its
+        // Continue button would.
+        Application.ThreadException += (_, e) => Log.Error("UI thread exception (carrying on): " + e.Exception);
 
         // "Glissando.exe --exit": stop the instance that runs, for when its tray icon is not there to click.
         if (exitOther)
