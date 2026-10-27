@@ -489,6 +489,10 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         if (!TryParseSetupKey(fromKey, out var oldMine, out var oldName, out var oldPeer)
             || !TryParseSetupKey(toKey, out var newMine, out var newName, out var newPeer)
             || oldName != newName || oldPeer.Length == 0 || newPeer.Length == 0) return null;
+        // A dock pulled out or plugged in, a monitor unplugged: one side's screens are the other's plus or minus some.
+        // Screens swapped for others is another desk, where the laptop's panel - shared by every desk - stands
+        // somewhere else: carrying by it put LU under RS's screen 5 at a new desk instead of beside it (2026-10-27).
+        if (!Nested(oldMine, newMine) || !Nested(oldPeer, newPeer)) return null;
         // How far the shared panels moved. When they disagree (screens rearranged in Display settings), go by the
         // panels the other PC stood beside - it is still beside them - and then by what most panels say.
         static Point? Moved(MonitorRect[] from, MonitorRect[] to, Func<MonitorRect, bool> preferred)
@@ -561,6 +565,15 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
             return (n.Number, TopLeft: new Point(o.X - then.X + now.X, o.Y - then.Y + now.Y), Moved: o.X - then.X != n.Bounds.X - now.X || o.Y - then.Y != n.Bounds.Y - now.Y);
         }).ToArray();
         return moves.Any(m => m.Moved) ? moves.Select(m => (m.Number, m.TopLeft)).ToArray() : null;
+    }
+
+    /// <summary>One set of screens within the other, by EDID identity. True where identities are missing.</summary>
+    private static bool Nested(MonitorRect[] x, MonitorRect[] y)
+    {
+        if (x.Any(m => m.Id == "") || y.Any(m => m.Id == "")) return true;
+        var a = x.Select(m => m.Id).ToHashSet(StringComparer.Ordinal);
+        var b = y.Select(m => m.Id).ToHashSet(StringComparer.Ordinal);
+        return a.IsSubsetOf(b) || b.IsSubsetOf(a);
     }
 
     private static bool SameSet(MonitorRect[] x, MonitorRect[] y)

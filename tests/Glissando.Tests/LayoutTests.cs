@@ -247,6 +247,20 @@ public class CarryPlacementTests
     }
 
     [Fact]
+    public void AnotherDesk_SharingOnlyTheLaptopPanel_CarriesNothing()
+    {
+        // 2026-10-27: from the 4K desk to one of six HP screens, R the only panel at both; carried by R, LU landed
+        // under a screen it never stood by.
+        MonitorRect[] hp =
+        [
+            new(new Rectangle(0, 0, 1920, 1080), 6, "H6"), new(new Rectangle(1920, 0, 1920, 1080), 3, "H3"),
+            new(new Rectangle(0, 1082, 1920, 1080), 5, "H5"), new(new Rectangle(1920, 1082, 1920, 1200), 1, "R"),
+        ];
+        Assert.Null(Layout.CarryPlacement(new Point(-1920, 1096), Layout.SetupKey(RsDocked, "LU", Lu), Layout.SetupKey(hp, "LU", Lu)));
+        Assert.Null(Layout.CarryPlacement(new Point(1920, -1096), Layout.SetupKey(Lu, "RS", RsDocked), Layout.SetupKey(Lu, "RS", hp)));
+    }
+
+    [Fact]
     public void ViewHash_FollowsBoundsOnly()
     {
         Assert.Equal(0u, Layout.ViewHash([]));

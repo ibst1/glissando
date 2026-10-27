@@ -292,7 +292,13 @@ public sealed class Session : IDisposable
                 Point? carried = Layout.IsCompleteSetupKey(previous) ? Layout.CarryPlacement(new Point(px, py), previous, key) : new Point(px, py);
                 if (carried is not Point c)
                 {
-                    Log.Info($"screen setup ({why}): new, and no screen in common with the previous desk; not remembering a placement for it - place the other PC on the Screens tab");
+                    // The placement in use is another desk's: start from the default rather than leave its numbers
+                    // standing against screens they were never meant for.
+                    Log.Info($"screen setup ({why}): new, and not the previous desk with screens added or removed; not remembering a placement for it - place the other PC on the Screens tab");
+                    _s.PeerX = null; _s.PeerY = null; _s.PeerShifts = ""; _s.MyShifts = "";
+                    RebuildLayout();
+                    SettingsChanged?.Invoke();
+                    if (Linked) SendHello();
                     return;
                 }
                 bool moved = c != new Point(px, py);
@@ -690,7 +696,7 @@ public sealed class Session : IDisposable
     {
         RandomNumberGenerator.Fill(_myNonce);
         var layout = _capture.Layout;
-        var hello = Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, _s.PlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version,
+        var hello = Frame.Hello(new HelloInfo(_s.CaptureEnabled, layout.PeerOrigin, layout.MyBounds.Size, ClaimedPlacementUpdated, _myNonce, layout.Mine, Environment.MachineName, Program.Version,
             (ushort)(_udp?.LocalPort ?? 0), _udp != null ? UdpPixelLink.LocalAddresses() : null,
             _s.Placements.TryGetValue(_setupKey, out var desk) ? desk.Name : "", _s.Placements.TryGetValue(_setupKey, out var desk2) ? desk2.NameUpdated : 0,
             Layout.ViewHash(_s.OtherMonitorList),
@@ -965,6 +971,12 @@ public sealed class Session : IDisposable
         }
     }
 
+    /// <summary>The edit time our placement can claim against the other PC's. At a complete desk with no placement
+    /// remembered for it, the one in use was left over from another desk, and its edit time with it: none. LU sent
+    /// such a leftover from the clinic's 4K desk with that desk's time, and RS took it at a new desk (2026-10-27).</summary>
+    private long ClaimedPlacementUpdated =>
+        Layout.IsCompleteSetupKey(_setupKey) && !_s.Placements.ContainsKey(_setupKey) ? 0 : _s.PlacementUpdated;
+
     /// <summary>Take the peer's monitors, and its placement if it was edited more recently than ours.</summary>
     private void AdoptPeerInfo(HelloInfo hello)
     {
@@ -1000,11 +1012,12 @@ public sealed class Session : IDisposable
             return;
         }
         _lastStaleView = 0;
-        bool newer = hello.PlacementUpdated > _s.PlacementUpdated;
+        long ours = ClaimedPlacementUpdated;
+        bool newer = hello.PlacementUpdated > ours;
         // Nobody has saved a placement yet and the two defaults disagree (both say "the other PC is to my
         // right"): let the PC with the greater name adopt the other's view, so the pair is at least consistent
         // and the cursor can come back. Saving in the settings dialog on either PC replaces this.
-        bool tieBreak = !newer && hello.PlacementUpdated == _s.PlacementUpdated && (theirView != myView || hello.PeerShifts != _s.MyShifts || hello.MyShifts != _s.PeerShifts)
+        bool tieBreak = !newer && hello.PlacementUpdated == ours && (theirView != myView || hello.PeerShifts != _s.MyShifts || hello.MyShifts != _s.PeerShifts)
             && string.CompareOrdinal(Environment.MachineName, hello.Name) > 0;
         if (newer || tieBreak)
         {
