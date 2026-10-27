@@ -20,6 +20,18 @@ public class PrintTests
         Assert.Equal(sha, info.Sha256);
         Assert.Equal(@"\\print.example\Följ-mig", info.Printer);
         Assert.StartsWith("Årsredovisning", info.Name);
+        Assert.True(info.TwoSided);
+    }
+
+    /// <summary>One-sided, the printer field is the bare name, as a peer from before the choice expects it.</summary>
+    [Fact]
+    public void Begin_OneSided_IsReadableByAnOlderPeer()
+    {
+        var f = PrintFrames.Begin(7, 1000, PrintFrames.ChunkSize, new byte[32], "a.pdf", "PULLPRINT_GLOBAL", false);
+        Assert.EndsWith("a.pdfPULLPRINT_GLOBAL", System.Text.Encoding.UTF8.GetString(f.Payload));
+        var info = PrintFrames.ParseBegin(f)!;
+        Assert.Equal("PULLPRINT_GLOBAL", info.Printer);
+        Assert.False(info.TwoSided);
     }
 
     [Fact]

@@ -128,8 +128,8 @@ public sealed class Settings
     /// <summary>The other PC may print PDFs and pictures on this PC's printers.</summary>
     public bool AcceptPrintJobs { get; set; } = true;
 
-    /// <summary>The other PC's printer that files in the print folder go to: the one last chosen in the tray menu;
-    /// "" = the other PC's default printer.</summary>
+    /// <summary>The other PC's printer for Explorer's right-click entries, Send to and the print folder, chosen in
+    /// the tray menu; "" = the other PC's default printer.</summary>
     public string PrintPrinter { get; set; } = "";
 
     /// <summary>Print on both sides of the paper: files chosen in the tray menu and those in the print folder itself.</summary>

@@ -34,10 +34,11 @@ public static class PrintFrames
     public static bool Printable(string path) => Extensions.Contains(Path.GetExtension(path).ToLowerInvariant());
 
     // PrintBegin: job(u32) size(u32) chunk(u16) sha256(32) nameLen(1) name(UTF-8) printer(UTF-8, the rest; "" = default)
-    // The printer is followed by "\n1" (one-sided) or "\n2" (two-sided); a printer name has no line breaks.
+    // Two-sided: the printer is followed by "\n2" (a printer name has no line breaks). Nothing for one-sided, so a
+    // peer older than the choice still finds the printer: to it "NAME\n1" was no printer, and it took its default.
     public static Frame Begin(uint job, int size, int chunk, byte[] sha, string name, string printer, bool twoSided)
     {
-        var pr = Encoding.UTF8.GetBytes(printer + (twoSided ? "\n2" : "\n1"));
+        var pr = Encoding.UTF8.GetBytes(twoSided ? printer + "\n2" : printer);
         var nm = Utf8Prefix(name, Math.Min(255, 400 - BeginFixed - pr.Length));
         var p = new byte[BeginFixed + nm.Length + pr.Length];
         BinaryPrimitives.WriteUInt32LittleEndian(p, job);
