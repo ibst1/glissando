@@ -8,9 +8,9 @@ using Windows.Storage.Streams;
 namespace Glissando.Printing;
 
 /// <summary>
-/// Prints a PDF or a picture on one of this PC's printers without any other program: Windows renders the PDF
-/// pages (Windows.Data.Pdf, the same engine as Edge's viewer) and WinForms printing sends them to the printer
-/// with its default settings. A PDF page prints at its true size, placed on the paper the way the PDF has it,
+/// Prints a PDF or a picture on one of this PC's printers without any other program: PDFium (or, failing that,
+/// Windows.Data.Pdf) renders the PDF pages and WinForms printing sends them to the printer with its default
+/// settings, one- or two-sided as asked. A PDF page prints at its true size, placed on the paper the way the PDF has it,
 /// shrunk only when it is bigger than the paper; a picture is fitted to the printable area.
 /// </summary>
 internal static class DocumentPrinter
@@ -26,12 +26,21 @@ internal static class DocumentPrinter
         return (def, all);
     }
 
-    /// <summary>Prints the file; returns the number of pages. <paramref name="toFile"/>: the printer's output goes
-    /// to that file instead (tests, with "Microsoft Print to PDF").</summary>
-    public static int Print(string path, string printer, string documentName, string? toFile = null) =>
-        Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
-            ? PrintPdf(path, printer, documentName, toFile)
-            : PrintPicture(path, printer, documentName, toFile);
+    /// <summary>Prints the file, one- or two-sided; returns the number of pages, and a note when the printer could
+    /// not do as asked. <paramref name="toFile"/>: the printer's output goes to that file instead (tests, with
+    /// "Microsoft Print to PDF").</summary>
+    public static (int Pages, string Note) Print(string path, string printer, string documentName, bool twoSided, string? toFile = null)
+    {
+        string note = "";
+        using var doc = NewDocument(printer, documentName, toFile);
+        // Always set, both ways: a printer whose own default is two-sided must still print one-sided when asked.
+        if (twoSided && !doc.PrinterSettings.CanDuplex) note = "one-sided: the printer cannot print two-sided";
+        else doc.PrinterSettings.Duplex = twoSided ? Duplex.Vertical : Duplex.Simplex; // Vertical = long-edge binding
+        int pages = Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
+            ? PrintPdf(doc, path)
+            : PrintPicture(doc, path);
+        return (pages, note);
+    }
 
     private static PrintDocument NewDocument(string printer, string name, string? toFile)
     {
@@ -42,27 +51,60 @@ internal static class DocumentPrinter
         return doc;
     }
 
-    private static int PrintPdf(string path, string printer, string name, string? toFile)
+    /// <summary>A PDF's pages: how many, each one's size in hundredths of an inch, and each one drawn at a pixel size.</summary>
+    internal interface IPdfPages : IDisposable
     {
-        var file = StorageFile.GetFileFromPathAsync(path).AsTask().GetAwaiter().GetResult();
-        PdfDocument pdf;
-        try { pdf = PdfDocument.LoadFromFileAsync(file).AsTask().GetAwaiter().GetResult(); }
-        catch (Exception ex) when (ex.HResult == unchecked((int)0x8007052B)) { throw new InvalidOperationException("the PDF is password protected"); }
-        int count = (int)pdf.PageCount, next = 0;
+        int Count { get; }
+        SizeF Size(int index);
+        Bitmap Render(int index, int width, int height);
+    }
+
+    /// <summary>PDFium when it loads here, Windows.Data.Pdf otherwise (or when asked, for tests).</summary>
+    internal static IPdfPages OpenPdf(string path, bool windowsEngine = false) =>
+        !windowsEngine && PdfiumDocument.Available() ? new PdfiumPages(File.ReadAllBytes(path)) : new WindowsPages(path);
+
+    private sealed class PdfiumPages(byte[] data) : IPdfPages
+    {
+        private readonly PdfiumDocument _pdf = new(data);
+        public int Count => _pdf.PageCount;
+        public SizeF Size(int index) { var s = _pdf.PageSize(index); return new SizeF(s.Width * 100f / 72f, s.Height * 100f / 72f); }
+        public Bitmap Render(int index, int width, int height) => _pdf.Render(index, width, height);
+        public void Dispose() => _pdf.Dispose();
+    }
+
+    private sealed class WindowsPages : IPdfPages
+    {
+        private readonly PdfDocument _pdf;
+        public WindowsPages(string path)
+        {
+            var file = StorageFile.GetFileFromPathAsync(path).AsTask().GetAwaiter().GetResult();
+            try { _pdf = PdfDocument.LoadFromFileAsync(file).AsTask().GetAwaiter().GetResult(); }
+            catch (Exception ex) when (ex.HResult == unchecked((int)0x8007052B)) { throw new InvalidOperationException("the PDF is password protected"); }
+        }
+        public int Count => (int)_pdf.PageCount;
+        // DIPs (1/96 inch) -> hundredths of an inch.
+        public SizeF Size(int index) { using var p = _pdf.GetPage((uint)index); return new SizeF((float)p.Size.Width * 100f / 96f, (float)p.Size.Height * 100f / 96f); }
+        public Bitmap Render(int index, int width, int height) { using var p = _pdf.GetPage((uint)index); return WindowsRender(p, (uint)width, (uint)height); }
+        public void Dispose() { }
+    }
+
+    private static int PrintPdf(PrintDocument doc, string path)
+    {
+        using var pdf = OpenPdf(path);
+        int count = pdf.Count, next = 0;
         if (count == 0) throw new InvalidOperationException("the PDF has no pages");
-        using var doc = NewDocument(printer, name, toFile);
         // Each page in its own orientation, so a landscape page is not shrunk onto portrait paper.
         doc.QueryPageSettings += (_, e) =>
         {
-            using var page = pdf.GetPage((uint)next);
-            e.PageSettings.Landscape = page.Size.Width > page.Size.Height;
+            var size = pdf.Size(next);
+            e.PageSettings.Landscape = size.Width > size.Height;
         };
         doc.PrintPage += (_, e) =>
         {
-            using var page = pdf.GetPage((uint)next);
-            // The page's size in DIPs (1/96 inch) -> hundredths of an inch, the printer Graphics' unit.
-            float w = (float)page.Size.Width * 100f / 96f, h = (float)page.Size.Height * 100f / 96f;
-            using var bmp = Render(page, (uint)Math.Max(1, w * RenderDpi / 100), (uint)Math.Max(1, h * RenderDpi / 100));
+            // In hundredths of an inch, the printer Graphics' unit.
+            var size = pdf.Size(next);
+            float w = size.Width, h = size.Height;
+            using var bmp = pdf.Render(next, (int)Math.Max(1, w * RenderDpi / 100), (int)Math.Max(1, h * RenderDpi / 100));
             var paper = Paper(e.Graphics!);
             float scale = Math.Min(1f, Math.Min(paper.Width / w, paper.Height / h));
             float dw = w * scale, dh = h * scale;
@@ -76,10 +118,9 @@ internal static class DocumentPrinter
         return count;
     }
 
-    private static int PrintPicture(string path, string printer, string name, string? toFile)
+    private static int PrintPicture(PrintDocument doc, string path)
     {
         using var img = Image.FromFile(path);
-        using var doc = NewDocument(printer, name, toFile);
         doc.DefaultPageSettings.Landscape = img.Width > img.Height;
         doc.PrintPage += (_, e) =>
         {
@@ -96,7 +137,7 @@ internal static class DocumentPrinter
         return 1;
     }
 
-    private static Bitmap Render(PdfPage page, uint width, uint height)
+    private static Bitmap WindowsRender(PdfPage page, uint width, uint height)
     {
         using var stream = new InMemoryRandomAccessStream();
         page.RenderToStreamAsync(stream, new PdfPageRenderOptions { DestinationWidth = width, DestinationHeight = height }).AsTask().GetAwaiter().GetResult();

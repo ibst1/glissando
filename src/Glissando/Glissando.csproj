@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -29,11 +29,18 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="$(Pkgbblanchon_PDFium_Win32)\runtimes\win-x64\native\pdfium.dll" LogicalName="pdfium.dll" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- build.ps1 passes -p:BuildTime; Program.Version shows it next to the version. -->
     <AssemblyMetadata Include="BuildTime" Value="$(BuildTime)" Condition="'$(BuildTime)' != ''" />
   </ItemGroup>
 
   <ItemGroup>
+    <!-- PDFium (Chrome's PDF engine) prints filled-in forms right, where Windows.Data.Pdf picks the wrong font.
+         Only its pdfium.dll is used, embedded in the exe (RS gets the exe alone) and unpacked on first print. -->
+    <PackageReference Include="bblanchon.PDFium.Win32" Version="158.0.8125" ExcludeAssets="all" GeneratePathProperty="true" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>

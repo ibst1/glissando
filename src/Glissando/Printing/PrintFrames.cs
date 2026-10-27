@@ -13,7 +13,7 @@ public enum PrintState : byte
     Failed = 4,   // with a message
 }
 
-public sealed record PrintBeginInfo(uint Job, int Size, int Chunk, byte[] Sha256, string Name, string Printer);
+public sealed record PrintBeginInfo(uint Job, int Size, int Chunk, byte[] Sha256, string Name, string Printer, bool TwoSided);
 
 /// <summary>
 /// Printing on the other PC's printers: the file itself travels (a PDF or a picture) and the other PC prints
@@ -34,9 +34,10 @@ public static class PrintFrames
     public static bool Printable(string path) => Extensions.Contains(Path.GetExtension(path).ToLowerInvariant());
 
     // PrintBegin: job(u32) size(u32) chunk(u16) sha256(32) nameLen(1) name(UTF-8) printer(UTF-8, the rest; "" = default)
-    public static Frame Begin(uint job, int size, int chunk, byte[] sha, string name, string printer)
+    // The printer is followed by "\n1" (one-sided) or "\n2" (two-sided); a printer name has no line breaks.
+    public static Frame Begin(uint job, int size, int chunk, byte[] sha, string name, string printer, bool twoSided)
     {
-        var pr = Encoding.UTF8.GetBytes(printer);
+        var pr = Encoding.UTF8.GetBytes(printer + (twoSided ? "\n2" : "\n1"));
         var nm = Utf8Prefix(name, Math.Min(255, 400 - BeginFixed - pr.Length));
         var p = new byte[BeginFixed + nm.Length + pr.Length];
         BinaryPrimitives.WriteUInt32LittleEndian(p, job);
@@ -57,7 +58,10 @@ public static class PrintFrames
         if (size <= 0 || chunk == 0) return null;
         string name = Encoding.UTF8.GetString(p, BeginFixed, p[42]);
         string printer = Encoding.UTF8.GetString(p, BeginFixed + p[42], p.Length - BeginFixed - p[42]);
-        return new(f.U32(0), size, chunk, p[10..42], name, printer);
+        bool twoSided = false;
+        int nl = printer.LastIndexOf('\n');
+        if (nl >= 0) { twoSided = printer[(nl + 1)..] == "2"; printer = printer[..nl]; }
+        return new(f.U32(0), size, chunk, p[10..42], name, printer, twoSided);
     }
 
     // PrintChunk: job(u32) index(u32) + the bytes at index * chunk

@@ -170,8 +170,11 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         // Printing on the other PC: files dropped in the print folder go to the printer last chosen in the menu,
         // once the other PC is linked and has said which printers it has.
         _printFolder = new Printing.PrintFolder(() => _session.Authenticated && _session.PeerPrinters is { All.Length: > 0 });
-        _printFolder.FileReady += path => _session.Print(new Printing.PrintJob(path, FolderPrinter(), FromFolder: true));
+        _printFolder.FileReady += (path, twoSided) => _session.Print(new Printing.PrintJob(path, FolderPrinter(), FromFolder: true, twoSided ?? _settings.PrintTwoSided));
         _session.PeerPrintersChanged += _printFolder.Scan;
+        // The Explorer menu names the other PC once it is known.
+        _session.PeerPrintersChanged += () => Printing.PrintFolder.EnsureExplorerMenu(PeerLabel);
+        Printing.PrintFolder.EnsureExplorerMenu(PeerLabel);
         _session.PrintFinished += (job, ok, message) =>
         {
             if (job.FromFolder) _printFolder.Done(job.Path, ok);
@@ -331,6 +334,13 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             }
         }
         items.Add(new ToolStripSeparator());
+        var twoSided = new ToolStripMenuItem("Two-sided (both sides of the paper)") { Checked = _settings.PrintTwoSided, CheckOnClick = true };
+        twoSided.Click += (_, _) =>
+        {
+            _settings.PrintTwoSided = twoSided.Checked;
+            try { _settings.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
+        };
+        items.Add(twoSided);
         items.Add("Open the print folder: PDFs saved there print on the ticked printer", null, (_, _) => OpenPath(Printing.PrintFolder.FolderPath));
         items.Add($"Open the files printed here from {PeerLabel}", null, (_, _) => { Directory.CreateDirectory(Printing.PrintReceiver.Folder); OpenPath(Printing.PrintReceiver.Folder); });
         var accept = new ToolStripMenuItem($"Let {PeerLabel} print on this PC's printers") { Checked = _settings.AcceptPrintJobs, CheckOnClick = true };
@@ -355,7 +365,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         // The chosen printer also becomes the print folder's.
         _settings.PrintPrinter = printer;
         try { _settings.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
-        foreach (var f in dlg.FileNames) _session.Print(new Printing.PrintJob(f, printer, FromFolder: false));
+        foreach (var f in dlg.FileNames) _session.Print(new Printing.PrintJob(f, printer, FromFolder: false, _settings.PrintTwoSided));
         string what = dlg.FileNames.Length == 1 ? Path.GetFileName(dlg.FileNames[0]) : $"{dlg.FileNames.Length} files";
         _tray.ShowBalloonTip(4000, "Glissando", $"Sending {what} to {printer} on {PeerLabel}...", ToolTipIcon.Info);
     }

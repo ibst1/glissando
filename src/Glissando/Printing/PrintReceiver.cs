@@ -25,7 +25,7 @@ internal sealed class PrintReceiver
     private readonly Func<bool> _accept;
     private readonly Action<Frame> _send;
     private readonly SemaphoreSlim _printer = new(1, 1);
-    private readonly Func<string, string, string, int> _print;
+    private readonly Func<string, string, string, bool, (int Pages, string Note)> _print;
     private readonly Func<(string Default, string[] All)> _printers;
 
     public static string Folder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Glissando", "Prints");
@@ -33,12 +33,12 @@ internal sealed class PrintReceiver
     /// <summary>Something to tell the user here: (text, is an error). Raised on a worker thread.</summary>
     public event Action<string, bool>? Notice;
 
-    /// <param name="print">(file, printer, document name) -> pages; DocumentPrinter.Print unless a test says otherwise.</param>
-    public PrintReceiver(Func<bool> accept, Action<Frame> send, Func<string, string, string, int>? print = null, Func<(string, string[])>? printers = null)
+    /// <param name="print">(file, printer, document name, two-sided) -> pages and a note; DocumentPrinter.Print unless a test says otherwise.</param>
+    public PrintReceiver(Func<bool> accept, Action<Frame> send, Func<string, string, string, bool, (int, string)>? print = null, Func<(string, string[])>? printers = null)
     {
         _accept = accept;
         _send = send;
-        _print = print ?? ((file, printer, name) => DocumentPrinter.Print(file, printer, name));
+        _print = print ?? ((file, printer, name, twoSided) => DocumentPrinter.Print(file, printer, name, twoSided));
         _printers = printers ?? DocumentPrinter.Printers;
     }
 
@@ -63,7 +63,7 @@ internal sealed class PrintReceiver
             }
             else job = new Incoming(info);
             _jobs[info.Job] = job;
-            if (job.State == PrintState.Missing) Log.Info($"print job {info.Job:x8} from the other PC: {info.Name}, {info.Size / 1024} kB, printer \"{info.Printer}\"");
+            if (job.State == PrintState.Missing) Log.Info($"print job {info.Job:x8} from the other PC: {info.Name}, {info.Size / 1024} kB, printer \"{info.Printer}\"{(info.TwoSided ? ", two-sided" : "")}");
         }
     }
 
@@ -134,8 +134,9 @@ internal sealed class PrintReceiver
             }
             if (printer == "") throw new InvalidOperationException($"{Environment.MachineName} has no printer");
             string path = Save(job);
-            int pages = _print(path, printer, job.Info.Name);
-            job.Message = $"{pages} page{(pages == 1 ? "" : "s")} on {printer}{note}";
+            var (pages, sides) = _print(path, printer, job.Info.Name, job.Info.TwoSided);
+            if (sides != "") note += $" ({sides})";
+            job.Message = $"{pages} page{(pages == 1 ? "" : "s")}{(job.Info.TwoSided && sides == "" ? " two-sided" : "")} on {printer}{note}";
             job.State = PrintState.Printed;
             Log.Info($"print job {job.Info.Job:x8}: {job.Info.Name} printed, {job.Message}");
             Notice?.Invoke($"Printed {job.Info.Name} from the other PC: {job.Message}", false);

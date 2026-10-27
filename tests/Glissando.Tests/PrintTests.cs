@@ -12,7 +12,7 @@ public class PrintTests
     {
         var sha = Enumerable.Range(0, 32).Select(i => (byte)i).ToArray();
         string name = string.Concat(Enumerable.Repeat("Årsredovisning för föreningen ", 20)) + ".pdf";
-        var f = PrintFrames.Begin(7, 123456, PrintFrames.ChunkSize, sha, name, @"\\print.example\Följ-mig");
+        var f = PrintFrames.Begin(7, 123456, PrintFrames.ChunkSize, sha, name, @"\\print.example\Följ-mig", true);
         Assert.True(f.Encode().Length <= 401);
         var info = PrintFrames.ParseBegin(f)!;
         Assert.Equal(7u, info.Job);
@@ -53,7 +53,7 @@ public class PrintTests
         PrintSender? sender = null;
         var rnd = new Random(2);
         var receiver = new PrintReceiver(() => true, f => sender!.OnStatus(f),
-            print: (path, printer, _) => { printed = File.ReadAllBytes(path); printedOn = printer; return 2; },
+            print: (path, printer, _, twoSided) => { printed = File.ReadAllBytes(path); printedOn = printer; return (2, twoSided ? "" : "unexpected"); },
             printers: () => ("Kontor", new[] { "Kontor", "Färg" }));
         void Deliver(Frame f)
         {
@@ -69,13 +69,13 @@ public class PrintTests
         sender.Finished += (_, ok, msg) => done.TrySetResult((ok, msg));
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         _ = sender.RunAsync(cts.Token);
-        sender.Add(new PrintJob(file, "Färg", false));
+        sender.Add(new PrintJob(file, "Färg", false, TwoSided: true));
         var (ok, message) = await done.Task.WaitAsync(cts.Token);
         File.Delete(file);
         Assert.True(ok, message);
         Assert.Equal(data, printed);
         Assert.Equal("Färg", printedOn);
-        Assert.Contains("2 pages on Färg", message);
+        Assert.Contains("2 pages two-sided on Färg", message);
     }
 
     [Fact]
@@ -83,7 +83,7 @@ public class PrintTests
     {
         Frame? answer = null;
         var receiver = new PrintReceiver(() => false, f => answer = f);
-        receiver.OnBegin(PrintFrames.Begin(3, 1000, PrintFrames.ChunkSize, new byte[32], "a.pdf", ""));
+        receiver.OnBegin(PrintFrames.Begin(3, 1000, PrintFrames.ChunkSize, new byte[32], "a.pdf", "", false));
         receiver.OnCheck(PrintFrames.Check(3));
         var st = PrintFrames.ParseStatus(answer!.Value)!.Value;
         Assert.Equal(PrintState.Failed, st.State);
@@ -110,9 +110,9 @@ public class PrintTests
                 g.DrawString("Glissando print test", new Font("Arial", 40), Brushes.Black, 60, 250);
                 bmp.Save(png);
             }
-            Assert.Equal(1, DocumentPrinter.Print(png, pdfPrinter, "test.png", first));
+            Assert.Equal(1, DocumentPrinter.Print(png, pdfPrinter, "test.png", false, first).Pages);
             Assert.True(new FileInfo(first).Length > 1000);
-            Assert.Equal(1, DocumentPrinter.Print(first, pdfPrinter, "first.pdf", second));
+            Assert.Equal(1, DocumentPrinter.Print(first, pdfPrinter, "first.pdf", true, second).Pages);
             Assert.True(new FileInfo(second).Length > 1000);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }

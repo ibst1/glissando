@@ -132,6 +132,9 @@ public sealed class Settings
     /// "" = the other PC's default printer.</summary>
     public string PrintPrinter { get; set; } = "";
 
+    /// <summary>Print on both sides of the paper: files chosen in the tray menu and those in the print folder itself.</summary>
+    public bool PrintTwoSided { get; set; }
+
     [JsonIgnore]
     public Color MirrorFrame
     {

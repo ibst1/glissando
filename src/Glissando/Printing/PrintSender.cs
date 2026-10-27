@@ -6,7 +6,7 @@ namespace Glissando.Printing;
 
 /// <summary>A file to print on the other PC. <see cref="FromFolder"/>: it lay in the print folder, which moves it
 /// to Sent or Failed afterwards.</summary>
-public sealed record PrintJob(string Path, string Printer, bool FromFolder);
+public sealed record PrintJob(string Path, string Printer, bool FromFolder, bool TwoSided);
 
 /// <summary>
 /// The sending half of printing on the other PC: one job at a time, in the order given. Chunks go over the UDP
@@ -91,7 +91,7 @@ internal sealed class PrintSender
 
         uint id = (uint)Random.Shared.Next(1, int.MaxValue);
         int chunks = (data.Length + PrintFrames.ChunkSize - 1) / PrintFrames.ChunkSize;
-        var begin = PrintFrames.Begin(id, data.Length, PrintFrames.ChunkSize, SHA256.HashData(data), name, job.Printer);
+        var begin = PrintFrames.Begin(id, data.Length, PrintFrames.ChunkSize, SHA256.HashData(data), name, job.Printer, job.TwoSided);
         var check = PrintFrames.Check(id);
         Log.Info($"print {name}: {data.Length / 1024} kB in {chunks} chunks to {where}");
         SetProgress($"Sending {name} to {where}");
