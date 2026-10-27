@@ -47,6 +47,8 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private readonly Icon _iconIdle, _iconReady, _iconControlling, _iconControlled, _iconLocked, _iconError;
     private readonly ToolStripMenuItem _lockItem;
     private readonly ToolStripMenuItem _mirrorItem;
+    private readonly ToolStripMenuItem _printItem;
+    private readonly Printing.PrintFolder _printFolder;
     private readonly ToolStripMenuItem _bluetoothItem;
     private string _bluetoothShown = "";
     private readonly ContextMenuStrip _menu;
@@ -82,16 +84,18 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         _lockItem.Click += (_, _) => _session?.SetLocked(_lockItem.Checked);
         _mirrorItem = new ToolStripMenuItem("Mirror the active window to the other PC");
         _mirrorItem.Click += (_, _) => StartMirror();
+        _printItem = new ToolStripMenuItem("Print on the other PC");
         _bluetoothItem = new ToolStripMenuItem { Visible = false, ForeColor = Color.FromArgb(198, 40, 40), Font = new Font(SystemFonts.MenuFont ?? SystemFonts.DefaultFont, FontStyle.Bold) };
         _bluetoothItem.Click += (_, _) => ShowBluetoothBalloon(_session.BluetoothProblem);
         var menu = _menu = new ContextMenuStrip();
-        menu.Opening += (_, _) => RebuildMirrorStopItems();
+        menu.Opening += (_, _) => { RebuildMirrorStopItems(); RebuildPrintMenu(); };
         menu.Items.Add(new ToolStripMenuItem($"Glissando {Program.VersionLong}") { Enabled = false });
         menu.Items.Add(_status);
         menu.Items.Add(_bluetoothItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(_lockItem);
         menu.Items.Add(_mirrorItem);
+        menu.Items.Add(_printItem);
         menu.Items.Add("Settings...", null, (_, _) => OpenSettings());
         menu.Items.Add("Reconnect", null, (_, _) => _session?.Reconnect());
         menu.Items.Add("Open log", null, (_, _) => OpenPath(Log.FilePath));
@@ -162,6 +166,24 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
         // Incoming window-mirroring frames arrive on the receive threads; the receiver reassembles and decodes
         // there and asks for the UI thread only to paint.
         _session.MirrorReceived += OnMirrorFrame;
+
+        // Printing on the other PC: files dropped in the print folder go to the printer last chosen in the menu,
+        // once the other PC is linked and has said which printers it has.
+        _printFolder = new Printing.PrintFolder(() => _session.Authenticated && _session.PeerPrinters is { All.Length: > 0 });
+        _printFolder.FileReady += path => _session.Print(new Printing.PrintJob(path, FolderPrinter(), FromFolder: true));
+        _session.PeerPrintersChanged += _printFolder.Scan;
+        _session.PrintFinished += (job, ok, message) =>
+        {
+            if (job.FromFolder) _printFolder.Done(job.Path, ok);
+            string name = Path.GetFileName(job.Path);
+            _window.BeginInvoke(() => _tray.ShowBalloonTip(ok ? 5000 : 15000, "Glissando",
+                ok ? $"Printed {name} on {PeerLabel}: {message}."
+                   : $"Could not print {name} on {PeerLabel}: {message}." + (job.FromFolder ? " The file is in Glissando print\\Failed." : ""),
+                ok ? ToolTipIcon.Info : ToolTipIcon.Warning));
+        };
+        _session.PrintNotice += (text, error) => _window.BeginInvoke(() =>
+            _tray.ShowBalloonTip(error ? 15000 : 5000, "Glissando", text, error ? ToolTipIcon.Warning : ToolTipIcon.Info));
+        if (Printing.PrintFolder.EnsureSendTo() is string link) Log.Info($"made the Send to entry {link}");
 
         // Let go of the radio before sleep and start over after it: a live GATT server carried through
         // suspend is what left the Bluetooth stack with a dead LE server (2026-09-13). Suspend runs inline
@@ -277,6 +299,67 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
 
     private string PeerLabel => string.IsNullOrEmpty(_session.PeerName) ? "the other PC" : _session.PeerName;
 
+    // ---- printing on the other PC ----
+
+    /// <summary>The other PC's printer for the print folder: the one last chosen, while the other PC still has it,
+    /// else its default.</summary>
+    private string FolderPrinter() =>
+        _session.PeerPrinters is { } pp && pp.All.Contains(_settings.PrintPrinter) ? _settings.PrintPrinter : _session.PeerPrinters?.Default ?? "";
+
+    /// <summary>The "Print on ..." submenu, rebuilt each time the menu opens: one item per printer of the other
+    /// PC (choose files, print them there; the ticked one also takes the print folder's files), the print folder,
+    /// and whether the other PC may print here.</summary>
+    private void RebuildPrintMenu()
+    {
+        foreach (ToolStripItem old in _printItem.DropDownItems.Cast<ToolStripItem>().ToList()) old.Dispose();
+        _printItem.DropDownItems.Clear();
+        _printItem.Text = $"Print on {PeerLabel}";
+        var items = _printItem.DropDownItems;
+        var pp = _session.PeerPrinters;
+        string state = pp == null ? (_session.Authenticated ? $"{PeerLabel} needs this Glissando build ({Program.Version}) to print" : $"{PeerLabel} is not linked")
+            : pp.Value.All.Length == 0 ? $"{PeerLabel} does not take print jobs (or has no printers)"
+            : $"Choose PDFs or pictures and print them on {PeerLabel}:";
+        items.Add(new ToolStripMenuItem(state) { Enabled = false });
+        if (pp is { } p && p.All.Length > 0)
+        {
+            string ticked = FolderPrinter();
+            foreach (var printer in p.All)
+            {
+                var item = new ToolStripMenuItem(Short(printer, 60) + (printer == p.Default ? "   (default)" : "")) { Checked = printer == ticked };
+                item.Click += (_, _) => PrintFilesOn(printer);
+                items.Add(item);
+            }
+        }
+        items.Add(new ToolStripSeparator());
+        items.Add("Open the print folder: PDFs saved there print on the ticked printer", null, (_, _) => OpenPath(Printing.PrintFolder.FolderPath));
+        items.Add($"Open the files printed here from {PeerLabel}", null, (_, _) => { Directory.CreateDirectory(Printing.PrintReceiver.Folder); OpenPath(Printing.PrintReceiver.Folder); });
+        var accept = new ToolStripMenuItem($"Let {PeerLabel} print on this PC's printers") { Checked = _settings.AcceptPrintJobs, CheckOnClick = true };
+        accept.Click += (_, _) =>
+        {
+            _settings.AcceptPrintJobs = accept.Checked;
+            try { _settings.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
+            _session.AnnouncePrinters();
+        };
+        items.Add(accept);
+    }
+
+    private void PrintFilesOn(string printer)
+    {
+        using var dlg = new OpenFileDialog
+        {
+            Title = $"Print on {printer} ({PeerLabel})",
+            Filter = "PDF files and pictures|" + string.Join(';', Printing.PrintFrames.Extensions.Select(e => "*" + e)),
+            Multiselect = true,
+        };
+        if (dlg.ShowDialog() != DialogResult.OK || dlg.FileNames.Length == 0) return;
+        // The chosen printer also becomes the print folder's.
+        _settings.PrintPrinter = printer;
+        try { _settings.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); }
+        foreach (var f in dlg.FileNames) _session.Print(new Printing.PrintJob(f, printer, FromFolder: false));
+        string what = dlg.FileNames.Length == 1 ? Path.GetFileName(dlg.FileNames[0]) : $"{dlg.FileNames.Length} files";
+        _tray.ShowBalloonTip(4000, "Glissando", $"Sending {what} to {printer} on {PeerLabel}...", ToolTipIcon.Info);
+    }
+
     private static string Short(string title, int max = 50) =>
         (title == "" ? "(untitled)" : title.Length > max ? title[..(max - 3)] + "..." : title).Replace("&", "&&");
 
@@ -379,7 +462,8 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
     private void UpdateTray()
     {
         string text = _session.StatusText;
-        _status.Text = text;
+        string printing = _session.PrintProgress;
+        _status.Text = printing == "" ? text : text + "\n" + printing;
         _lockItem.Checked = _session.Locked;
         _mirrorItem.Enabled = _session.Authenticated;
         bool mismatch = _session.TransportStatus.StartsWith("other PC runs");
@@ -514,6 +598,7 @@ internal sealed class TrayContext : ApplicationContext, IClipboardAccess
             Microsoft.Win32.SystemEvents.SessionSwitch -= _sessionHandler;
             _fgTimer.Stop();
             _fgTimer.Dispose();
+            _printFolder.Dispose();
             _trayCheck.Stop();
             _trayCheck.Dispose();
             InstanceSignals.Dispose();

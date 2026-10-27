@@ -373,6 +373,78 @@ public sealed class Session : IDisposable
             }
             catch (Exception ex) { Log.Warn("udp: pixel path unavailable: " + ex.Message); _udp = null; }
         }
+
+        _printOut = new Printing.PrintSender(Enqueue, SendUdpOnly, () => Volatile.Read(ref _queued), () => Authenticated, () => RttMs);
+        _printOut.ProgressChanged += () => StateChanged?.Invoke();
+        _printOut.Finished += (job, ok, message) => PrintFinished?.Invoke(job, ok, message);
+        _printIn = new Printing.PrintReceiver(() => _s.AcceptPrintJobs, Enqueue);
+        _printIn.Notice += (text, error) => PrintNotice?.Invoke(text, error);
+    }
+
+    // ---- printing on the other PC (see Printing.PrintFrames) ----
+
+    private readonly Printing.PrintSender _printOut;
+    private readonly Printing.PrintReceiver _printIn;
+    private byte _printersId;
+    private (byte id, byte[]?[] chunks)? _printersIn;
+
+    /// <summary>The other PC's printers, from its Printers frames since it was last authenticated: its default
+    /// ("" if none) and all of them (none: it does not take print jobs). Null: it has not said (an older build).</summary>
+    public (string Default, string[] All)? PeerPrinters { get; private set; }
+
+    /// <summary>Raised when PeerPrinters changes (on the receive thread).</summary>
+    public event Action? PeerPrintersChanged;
+
+    /// <summary>A file sent to the other PC to print was printed there (true) or not, with the reason.</summary>
+    public event Action<Printing.PrintJob, bool, string>? PrintFinished;
+
+    /// <summary>A job from the other PC was printed here or failed: (text, is an error).</summary>
+    public event Action<string, bool>? PrintNotice;
+
+    /// <summary>The file being sent to the other PC's printer and how far it has got ("" when none).</summary>
+    public string PrintProgress => _printOut.Progress;
+
+    public int PrintsPending => _printOut.Pending;
+
+    /// <summary>Print a PDF or a picture on the other PC; printer "" = its default.</summary>
+    public void Print(Printing.PrintJob job) => _printOut.Add(job);
+
+    /// <summary>Tell the other PC this PC's printers again (after "print here" was switched on or off).</summary>
+    public void AnnouncePrinters() { if (Authenticated) _ = Task.Run(SendPrinters); }
+
+    private void SendPrinters()
+    {
+        try
+        {
+            var (def, all) = _s.AcceptPrintJobs ? Printing.DocumentPrinter.Printers() : ("", []);
+            byte id = ++_printersId;
+            foreach (var f in Printing.PrintFrames.Printers(id, def, all)) Enqueue(f);
+            Log.Info(_s.AcceptPrintJobs ? $"printers sent: {all.Length}, default \"{def}\"" : "printers sent: none (printing from the other PC is off)");
+        }
+        catch (Exception ex) { Log.Warn("listing printers: " + ex.Message); }
+    }
+
+    private void ReceivePrinters(Frame f)
+    {
+        if (f.Payload.Length < 3) return;
+        byte id = f.Payload[0], index = f.Payload[1], total = f.Payload[2];
+        if (total == 0 || index >= total) return;
+        if (_printersIn is not { } cur || cur.id != id || cur.chunks.Length != total)
+            _printersIn = cur = (id, new byte[]?[total]);
+        cur.chunks[index] = f.Payload[3..];
+        if (cur.chunks.Any(c => c == null)) return;
+        _printersIn = null;
+        var lines = Encoding.UTF8.GetString(cur.chunks.SelectMany(c => c!).ToArray()).Split('\n');
+        PeerPrinters = lines.Length < 2 ? ("", []) : (lines[0], lines[1..]);
+        Log.Info($"{PeerName} has {PeerPrinters.Value.All.Length} printer(s), default \"{PeerPrinters.Value.Default}\"");
+        PeerPrintersChanged?.Invoke();
+    }
+
+    /// <summary>A frame over UDP only; false when that path is not up (the caller then queues it on BLE).</summary>
+    private bool SendUdpOnly(Frame f)
+    {
+        var c = _cryptoUdp;
+        return c != null && _udp is { Up: true } && _udp.Send(c.Seal(f.Encode()));
     }
 
     /// <summary>A pixel frame for the peer: over UDP when that path is up, else queued on BLE like everything.</summary>
@@ -469,6 +541,7 @@ public sealed class Session : IDisposable
         sb.AppendLine($"State: controlling={Controlling} controlled={Controlled} keysForwarded={_capture.ForwardKeys} locked={Locked} sessionLocked={LocalLocked} peerLocked={PeerLocked} powerSaving={_powerSaving} peerPowerSaving={PeerPowerSaving} idle={Native.IdleMs() / 1000} s");
         sb.AppendLine($"Counters: movesForwarded={Interlocked.Read(ref _capture.MovesForwarded)} rejectedPackets={Rejected} queued={Volatile.Read(ref _queued)} dedupSeen={_dedupSeen.Count}");
         sb.AppendLine(_udp == null ? "UDP pixel path: off" : $"UDP pixel path: port {_udp.LocalPort} up={_udp.Up} peer={_udp.Peer?.ToString() ?? "-"} sent={_udp.SentBytes / 1024} kB received={_udp.ReceivedBytes / 1024} kB");
+        sb.AppendLine($"Printing: acceptHere={_s.AcceptPrintJobs} peerPrinters={(PeerPrinters is { } pp ? $"{pp.All.Length}, default \"{pp.Default}\"" : "unknown")} folderPrinter=\"{_s.PrintPrinter}\" pending={PrintsPending} {PrintProgress}");
         sb.AppendLine($"Settings: ble={_s.Ble} capture={_s.CaptureEnabled} clipboard={_s.SyncClipboard} hideCursor={_s.HideCursorWhileControlling} powerSave={_s.PowerSaveWhenIdle} keepalive={_s.KeepaliveMs} timeout={_s.PeerTimeoutMs} passphrase={(string.IsNullOrEmpty(_s.Passphrase) ? "(empty)" : $"set, {_s.Passphrase.Length} chars")} placementUpdated={_s.PlacementUpdated}");
         sb.AppendLine($"Layout: peerOrigin={layout.PeerOrigin} virtualScreen={Layout.MyVirtualScreen()}");
         foreach (var m in layout.Mine) sb.AppendLine($"  mine #{m.Number}: {m.Bounds}");
@@ -631,6 +704,7 @@ public sealed class Session : IDisposable
         _ = Task.Run(() => _channel.RunAsync(_cts.Token));
         _ = Task.Run(SenderLoop);
         _ = Task.Run(TimerLoop);
+        _ = Task.Run(() => _printOut.RunAsync(_cts.Token));
     }
 
     public void Reconnect() => _channel.Reconnect();
@@ -724,6 +798,8 @@ public sealed class Session : IDisposable
         if (v) { _lastPong = Stopwatch.GetTimestamp(); _pingsSincePong = 0; } // the "does it hear us" clock starts now
         if (v) SendStatus(); // the reliable stream is reset on link change, not on re-auth over the same link
         else { PeerLocked = false; PeerPowerSaving = false; }
+        // Listing printers can take seconds (network printers); the other PC's list stays known while unlinked.
+        if (v) _ = Task.Run(SendPrinters);
         StateChanged?.Invoke();
     }
 
@@ -868,6 +944,26 @@ public sealed class Session : IDisposable
 
             case FrameType.Identify:
                 if (Authenticated) IdentifyRequested?.Invoke();
+                break;
+
+            case FrameType.PrintBegin:
+                if (Authenticated) _printIn.OnBegin(f);
+                break;
+
+            case FrameType.PrintChunk:
+                if (Authenticated) _printIn.OnChunk(f);
+                break;
+
+            case FrameType.PrintCheck:
+                if (Authenticated) _printIn.OnCheck(f);
+                break;
+
+            case FrameType.PrintStatus:
+                if (Authenticated) _printOut.OnStatus(f);
+                break;
+
+            case FrameType.Printers:
+                if (Authenticated) ReceivePrinters(f);
                 break;
 
             case FrameType.Bye:

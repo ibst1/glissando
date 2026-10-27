@@ -39,6 +39,12 @@ public enum FrameType : byte
     MirrorResize = 29,   // id(1) w(u16) h(u16): the viewer resized the mirror's window; the source resizes its window to match
     Batch = 30,          // { len(u16) + an encoded frame }...: several frames in one packet, applied in order
     Identify = 31,       // empty: show this PC's screen numbers on its screens for a few seconds (Settings, Screens tab)
+    // Printing on the other PC's printers; see Printing.PrintFrames for the payloads.
+    PrintBegin = 32,     // a print job: its size, checksum, file name and printer
+    PrintChunk = 33,     // a piece of the job's file
+    PrintCheck = 34,     // the sender asks what is still missing
+    PrintStatus = 35,    // the printer answers: missing ranges, printing, printed or failed
+    Printers = 36,       // this PC's printers, in chunks, sent when the link is authenticated
 }
 
 public readonly record struct Frame(FrameType Type, byte[] Payload)

@@ -65,6 +65,29 @@ public static class Startup
         }
         catch (Exception ex) { return "start with Windows: could not re-point (" + ex.Message + ")"; }
     }
+
+    /// <summary>A .lnk file, made with the shell's own COM object (no administrator needed).</summary>
+    public static void CreateShortcut(string link, string target, string arguments, string description)
+    {
+        dynamic shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell")!)!;
+        dynamic sc = shell.CreateShortcut(link);
+        sc.TargetPath = target;
+        sc.Arguments = arguments;
+        sc.Description = description;
+        sc.IconLocation = target + ",0";
+        sc.Save();
+    }
+
+    /// <summary>The program a .lnk file starts, or null.</summary>
+    public static string? ShortcutTarget(string link)
+    {
+        try
+        {
+            dynamic shell = Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell")!)!;
+            return (string)shell.CreateShortcut(link).TargetPath;
+        }
+        catch { return null; }
+    }
 }
 
 /// <summary>

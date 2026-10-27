@@ -42,6 +42,22 @@ internal static class Program
                     Thread.Sleep(2000);
                     Host.CursorHider.RestoreAll();
                     return 0;
+                case "--print":
+                    // "Send to" and scripts: the files go into the print folder, where the running Glissando sends
+                    // them to the other PC's printer (or the next one does, once the other PC is linked).
+                    var files = args[(i + 1)..];
+                    if (files.Length == 0) { Native.AllocConsole(); Console.WriteLine("--print needs one or more files"); return 1; }
+                    var problems = new List<string>();
+                    foreach (var file in files)
+                    {
+                        if (!Printing.PrintFrames.Printable(file)) { problems.Add($"{Path.GetFileName(file)}: only PDF files and pictures can be printed on the other PC"); continue; }
+                        try { Printing.PrintFolder.Enqueue(file); }
+                        catch (Exception ex) { problems.Add($"{Path.GetFileName(file)}: {ex.Message}"); }
+                    }
+                    if (!Mutex.TryOpenExisting(InstanceSignals.MutexName, out var running)) problems.Add("Glissando is not running: the files print once it runs and the other PC is linked.");
+                    else running.Dispose();
+                    if (problems.Count > 0) MessageBox.Show(string.Join("\n\n", problems), "Glissando", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return 0;
                 case "--settings": settingsPath = Next(args, ref i); break;
                 case "--ble": overrides["ble"] = Next(args, ref i); break;
                 case "--mirror-test":
@@ -179,6 +195,7 @@ internal static class Program
 
           --setup     open the settings dialog before starting (if Glissando already runs, opens its settings)
           --exit      stop the running Glissando (for when its tray icon is not there to click)
+          --print <file>...  print PDFs or pictures on the other PC (via the "Glissando print" folder)
           --ble       which PC is the BLE peripheral (auto decides by itself)
           --settings  settings file (default %APPDATA%\Glissando\settings.json)
           --console   show a console window with the log

@@ -125,6 +125,13 @@ public sealed class Settings
     /// tray icon by default.</summary>
     public string MirrorFrameColor { get; set; } = "#4CAF50";
 
+    /// <summary>The other PC may print PDFs and pictures on this PC's printers.</summary>
+    public bool AcceptPrintJobs { get; set; } = true;
+
+    /// <summary>The other PC's printer that files in the print folder go to: the one last chosen in the tray menu;
+    /// "" = the other PC's default printer.</summary>
+    public string PrintPrinter { get; set; } = "";
+
     [JsonIgnore]
     public Color MirrorFrame
     {
