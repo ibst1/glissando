@@ -95,7 +95,9 @@ internal sealed class PlacementCanvas : Control
         var union = Rectangle.Union(layout.MyWorldBounds, layout.PeerBounds);
         if (union.IsEmpty) union = new Rectangle(0, 0, 1920, 1080);
         float legend = Compact ? 4 : 20, hint = Compact ? 4 : 18;
-        float margin = (Compact ? 0.08f : 0.18f) * Math.Max(union.Width, union.Height);
+        // A little air only: 18% on every side left the screens three quarters of the width. Dragging needs no room
+        // beyond them, since the view is frozen and the mouse captured while it lasts.
+        float margin = (Compact ? 0.08f : 0.06f) * Math.Max(union.Width, union.Height);
         float worldW = union.Width + 2 * margin, worldH = union.Height + 2 * margin;
         float scale = Math.Min((Width - 16) / worldW, (Height - legend - hint - 8) / worldH);
         var origin = new PointF(
