@@ -212,7 +212,7 @@ public sealed class Session : IDisposable
     private string? _lastClipboardSent;
     private readonly Dictionary<byte, (byte total, byte[]?[] chunks)> _clipIn = [];
     private string _setupKey = "";
-    private uint _lastStaleView;
+    private uint _lastStaleView, _lastOtherDesk;
 
     /// <summary>The screen setup changed (start, displays added or removed, the peer's monitors arrived): bring
     /// in the placement remembered for it, or remember the current one for a setup seen for the first time.</summary>
@@ -774,7 +774,8 @@ public sealed class Session : IDisposable
             (ushort)(_udp?.LocalPort ?? 0), _udp != null ? UdpPixelLink.LocalAddresses() : null,
             _s.Placements.TryGetValue(_setupKey, out var desk) ? desk.Name : "", _s.Placements.TryGetValue(_setupKey, out var desk2) ? desk2.NameUpdated : 0,
             Layout.ViewHash(_s.OtherMonitorList),
-            Layout.FormatShifts(layout.Peer, layout.PeerShift), Layout.FormatShifts(layout.Mine, layout.MineShift)));
+            Layout.FormatShifts(layout.Peer, layout.PeerShift), Layout.FormatShifts(layout.Mine, layout.MineShift),
+            Layout.DeskPrint(_setupKey)));
         // The monitor layout travels in Hello. A display or settings change mid-session sends one Hello, and on
         // this lossy link a single packet can be lost, leaving the peer with a stale arrangement -- the two
         // dialogs then disagree and a corner monitor becomes unreachable. Send a few copies so the update
@@ -1108,6 +1109,20 @@ public sealed class Session : IDisposable
             return;
         }
         _lastStaleView = 0;
+        // The peer's placement is filed under another desk (its screens or ours are not the ones here): however
+        // recent its edit, it is not this desk's. See Layout.DeskPrint.
+        uint myDesk = Layout.DeskPrint(_setupKey, asPeer: true);
+        if (hello.PlacementDesk != 0 && myDesk != 0 && hello.PlacementDesk != myDesk)
+        {
+            if (_lastOtherDesk != hello.PlacementDesk)
+            {
+                _lastOtherDesk = hello.PlacementDesk;
+                Log.Info($"{hello.Name} sends a placement that belongs to another desk; not adopting its placement or desk name");
+            }
+            if (changed) { RebuildLayout(); try { _s.Save(); } catch (Exception ex) { Log.Warn("save settings: " + ex.Message); } SettingsChanged?.Invoke(); }
+            return;
+        }
+        _lastOtherDesk = 0;
         long ours = ClaimedPlacementUpdated;
         bool newer = hello.PlacementUpdated > ours;
         // Nobody has saved a placement yet and the two defaults disagree (both say "the other PC is to my

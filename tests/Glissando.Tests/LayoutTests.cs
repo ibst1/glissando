@@ -393,4 +393,31 @@ public class ArrangementToRestoreTests
         var resized = Woke.Select(m => m.Id == "L" ? m with { Bounds = m.Bounds with { Width = 1280, Height = 800 } } : m).ToArray();
         Assert.Null(Layout.ArrangementToRestore([(DeskKey, 5L)], resized, ThreeScreens));
     }
+
+    // The clinic office and lab, from RS's side and from LU's: LU has its one panel at both, RS has HP or AOC screens.
+    private const string Office = "1921,0,1920,1080#3@HPN3905-CN432215FV;1,2,1920,1080#10@HPN3682-6CM24720QZ;0,1082,1920,1080#9@HPN3682-CNK2050ZR2;1921,1082,1920,1200#1@LGD0791|MEDJR7LNB4|0,0,1920,1200#1@CSW164A";
+    private const string OfficeRenumbered = "1921,0,1920,1080#3@HPN3905-CN432215FV;1,2,1920,1080#6@HPN3682-6CM24720QZ;0,1082,1920,1080#5@HPN3682-CNK2050ZR2;1921,1082,1920,1200#1@LGD0791|MEDJR7LNB4|0,0,1920,1200#1@CSW164A";
+    private const string Lab = "1920,0,3840,2160#3@AOC2703-ZXLQ9HA002046;5760,0,3840,2160#4@AOC2703-ZXLQ9HA002042;0,1065,1920,1080#2@AOC2702-HCKLCHA010850;2880,2160,1920,1200#1@LGD0791|MEDJR7LNB4|0,0,1920,1200#1@CSW164A";
+
+    [Fact]
+    public void DeskPrint_SameDeskFromBothPCs()
+    {
+        // LU's key for the office: its own panel, RS's name, RS's screens.
+        var fromLu = "0,0,1920,1200#1@CSW164A|RS30203762|" + Office.Split('|')[0];
+        Assert.Equal(Layout.DeskPrint(Office), Layout.DeskPrint(fromLu, asPeer: true));
+        Assert.NotEqual(0u, Layout.DeskPrint(Office));
+    }
+
+    [Fact]
+    public void DeskPrint_RenumberedIsTheSameDesk_OtherScreensAreNot()
+    {
+        Assert.Equal(Layout.DeskPrint(Office), Layout.DeskPrint(OfficeRenumbered));
+        Assert.NotEqual(Layout.DeskPrint(Office), Layout.DeskPrint(Lab));
+    }
+
+    [Fact]
+    public void DeskPrint_IncompleteKeyIsNone()
+    {
+        Assert.Equal(0u, Layout.DeskPrint("0,0,1920,1200#1@LGD0791||"));
+    }
 }

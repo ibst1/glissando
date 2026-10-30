@@ -31,6 +31,9 @@ internal sealed class PlacementCanvas : Control
 
     /// <summary>Screens moved on their own (see Layout); null = none.</summary>
     public Point[]? MineShift { get; set; }
+    /// <summary>The user put this PC's screens back where Windows has them (JoinMyScreens) and has not saved yet:
+    /// a reload after the display change must not bring the old shifts back.</summary>
+    public bool MineJoined { get; set; }
     public Point[]? PeerShift { get; set; }
 
     /// <summary>The other PC is linked now. When it is not, its screens are the last ones it reported (or a
@@ -244,6 +247,16 @@ internal sealed class PlacementCanvas : Control
         }
         else if (one && peerHit < 0 && mineHit >= 0 && Mine.Length > 1)
         {
+            // Arranging this PC's screens in Windows: draw and snap them where Windows has them. A screen still
+            // shown moved on its own (by the other PC) put a 693 px gap between 9 and 1 that no drag could close,
+            // and screen 4 was lined up with the drawing and landed 693 px off in Windows (2026-10-30).
+            if (MineShift != null)
+            {
+                JoinMyScreens();
+                layout = Current;
+                peerWorld = layout.PeerInMine();
+                mineWorld = layout.MineInWorld();
+            }
             _drag = DragKind.MineOne;
             _dragIndex = mineHit;
             _minePos = mineWorld[mineHit].Bounds.Location;
@@ -362,9 +375,16 @@ internal sealed class PlacementCanvas : Control
             }
             case DragKind.MineOne:
             {
-                // Flush against another of this PC's screens, as Windows wants them.
-                var others = layout.MineInWorld().Where((_, i) => i != _dragIndex).Select(m => m.Bounds).ToArray();
-                if (Glissando.Layout.SnapRect(Mine[_dragIndex].Bounds.Size, others, others, proposed, tolerance) is not Point at || at == _minePos) return;
+                // Flush against another of this PC's screens, as Windows wants them: where they really are, not where
+                // the placement draws them. A screen of mine the other PC moved on its own is drawn beside its real
+                // place; snapping to the drawing put screen 9 on top of the real screen 1, and Windows pushed it back
+                // out (2026-10-30). Snap in real pixels, then draw the dropped screen with its own shift again.
+                var shift = layout.MyShiftAt(_dragIndex);
+                var others = Mine.Where((_, i) => i != _dragIndex).Select(m => m.Bounds).ToArray();
+                var proposedReal = new Point(proposed.X - shift.X, proposed.Y - shift.Y);
+                if (Glissando.Layout.SnapRect(Mine[_dragIndex].Bounds.Size, others, others, proposedReal, tolerance) is not Point real) return;
+                var at = new Point(real.X + shift.X, real.Y + shift.Y);
+                if (at == _minePos) return;
                 _minePos = at;
                 Invalidate();
                 return; // nothing is placed until Windows has it
@@ -384,6 +404,19 @@ internal sealed class PlacementCanvas : Control
         var keep = layout.PeerShiftAt(0);
         PeerShift = null;
         _origin = Glissando.Layout.Snap(layout.MineInWorld(), Peer, new Point(_origin.X + keep.X, _origin.Y + keep.Y));
+        Invalidate();
+        PlacementChanged?.Invoke();
+    }
+
+    /// <summary>This PC's screens drawn where Windows has them again. A shift of one of them, made on the other PC,
+    /// can outlive its desk: screen 1 stood 693 px from where it really is at the clinic office, carried from the
+    /// lab, and nothing on this PC could take it away (2026-10-30). The other PC stays where it stands.</summary>
+    public void JoinMyScreens()
+    {
+        if (MineShift == null) return;
+        MineShift = null;
+        MineJoined = true;
+        _origin = Glissando.Layout.Snap(Mine, Glissando.Layout.Shift(Peer, PeerShift), _origin);
         Invalidate();
         PlacementChanged?.Invoke();
     }
@@ -425,6 +458,7 @@ internal sealed class SettingsForm : Form
     private string _originalShifts = "";
     private bool _syncing;
     private readonly Button _join = new() { Text = "Join its screens", AutoSize = true, Margin = new Padding(6, 0, 0, 0) };
+    private readonly Button _joinMine = new() { Text = "Join this PC's screens", AutoSize = true, Margin = new Padding(6, 0, 0, 0) };
     private readonly Label _identifyNote = new() { AutoSize = true, MaximumSize = new Size(TextWidth - 90, 0), ForeColor = SystemColors.GrayText, Padding = new Padding(6, 0, 0, 0) };
 
     // Text width for wrapped option labels and notes: the tab page minus padding, at 100 % scaling (the
@@ -586,6 +620,9 @@ internal sealed class SettingsForm : Form
         _join.Click += (_, _) => { _canvas.JoinPeerScreens(); UpdateJoin(); };
         _tips.SetToolTip(_join, "Put the other PC's screens back together as its Windows arranges them");
         toolRow.Controls.Add(_join);
+        _joinMine.Click += (_, _) => { _canvas.JoinMyScreens(); UpdateJoin(); };
+        _tips.SetToolTip(_joinMine, "Draw this PC's screens where Windows has them, none moved on its own");
+        toolRow.Controls.Add(_joinMine);
         toolRow.Controls.Add(_identifyNote);
         layout.Controls.Add(toolRow);
         UpdateJoin();
@@ -831,7 +868,7 @@ internal sealed class SettingsForm : Form
             _originalOrigin = now.PeerOrigin;
             _originalShifts = ShiftsText(now);
             _canvas.PeerOrigin = now.PeerOrigin;
-            _canvas.MineShift = now.MineShift;
+            _canvas.MineShift = _canvas.MineJoined ? null : now.MineShift;
             _canvas.PeerShift = now.PeerShift;
             SyncFromCanvas();
         }
@@ -846,7 +883,11 @@ internal sealed class SettingsForm : Form
     private string CanvasShiftsText() =>
         Glissando.Layout.FormatShifts(_canvas.Peer, _canvas.PeerShift) + "|" + Glissando.Layout.FormatShifts(_canvas.Mine, _canvas.MineShift);
 
-    private void UpdateJoin() => _join.Visible = _canvas.PeerShift != null;
+    private void UpdateJoin()
+    {
+        _join.Visible = _canvas.PeerShift != null;
+        _joinMine.Visible = _canvas.MineShift != null;
+    }
 
     /// <summary>One of this PC's screens was dropped somewhere new on the canvas: move it in Windows. The display
     /// change that follows brings the new arrangement back here (Reload), the other PC carried along by the screen
@@ -901,6 +942,7 @@ internal sealed class SettingsForm : Form
             _s.MyShifts = Glissando.Layout.FormatShifts(_canvas.Mine, _canvas.MineShift);
             if (edited) _s.PlacementUpdated = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
+        _canvas.MineJoined = false;
         _s.RememberPlacement(CurrentSetupKey());
         _s.CaptureEnabled = _capture.Checked;
         _s.SyncClipboard = _clip.Checked;

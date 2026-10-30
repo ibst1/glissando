@@ -567,6 +567,22 @@ public sealed record Layout(MonitorRect[] Mine, MonitorRect[] Peer, Point PeerOr
         return moves.Any(m => m.Moved) ? moves.Select(m => (m.Number, m.TopLeft)).ToArray() : null;
     }
 
+    /// <summary>Which desk a placement belongs to, as the two PCs can compare it: the physical screens on both sides
+    /// (EDID identity, or the size where there is none), not where they stand or how Windows numbers them, so a
+    /// renumbered or nudged screen is still the same desk. <paramref name="asPeer"/> reads the key from the other
+    /// PC's side, so both PCs get the same number for one desk. 0 when the key is not a complete desk.
+    /// <para>LU, with one screen, is at the same "arrangement" at every desk; it filed the clinic lab's placement
+    /// under the clinic office and sent it back with the lab's newer edit time, which RS took (2026-10-30). RS's
+    /// screens tell the two desks apart at once.</para></summary>
+    public static uint DeskPrint(string key, bool asPeer = false)
+    {
+        if (!IsCompleteSetupKey(key) || !TryParseSetupKey(key, out var mine, out _, out var peer) || peer.Length == 0) return 0;
+        static string Side(MonitorRect[] r) => string.Join(",", r.Select(m => m.Id != "" ? m.Id : $"{m.Bounds.Width}x{m.Bounds.Height}").OrderBy(k => k, StringComparer.Ordinal));
+        var sig = asPeer ? $"{Side(peer)}|{Side(mine)}" : $"{Side(mine)}|{Side(peer)}";
+        uint h = BitConverter.ToUInt32(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(sig)), 0);
+        return h == 0 ? 1 : h;
+    }
+
     /// <summary>One set of screens within the other, by EDID identity. True where identities are missing.</summary>
     private static bool Nested(MonitorRect[] x, MonitorRect[] y)
     {
